@@ -39,7 +39,14 @@ biohunter/
 
 ## Quick start
 
-_To be filled in once Phase 1 (Scout) lands. For now, see the design doc and roadmap._
+One-time setup, before writing any code:
+```bash
+pip install pre-commit --break-system-packages
+pre-commit install
+```
+This enables secrets scanning (gitleaks) on every commit — see [ADR-0002](docs/adr/0002-adopt-patterns-from-jht.md).
+
+The rest of the quick start will be filled in once Phase 1 (Scout) lands. For now, see the design doc and roadmap.
 
 ## Contributing (to yourself, six months from now)
 

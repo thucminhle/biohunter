@@ -14,6 +14,8 @@ Mirror these phases as GitHub Issues with checkboxes so progress is visible outs
 - [ ] n8n webhook client for resume assembly
 - [ ] LLM call for cover letter + tailoring rationale (cloud model)
 - [ ] Error handling: retry + stall-flagging if n8n unreachable (see ADR-0001)
+- [ ] Critic step: blind-review pass on Writer's output using a local model (no shared context with Writer's prompt) — see ADR-0002
+- [ ] Lightweight weekly cloud token/cost log — see ADR-0002
 
 ## Phase 3 — Analyst weekly report
 - [ ] Query layer: new postings, application status, outreach status
@@ -31,3 +33,6 @@ Mirror these phases as GitHub Issues with checkboxes so progress is visible outs
 - [ ] Email pattern inference + confidence scoring
 - [ ] Draft-only outreach email generation
 - [ ] Follow-up tracking surfaced in weekly report
+
+## Interface note (not yet a phase)
+- Consider Telegram bot as the approval channel for Filler/Networker gates instead of a full dashboard — revisit once those phases are actually being built (see ADR-0002).

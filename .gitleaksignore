@@ -1,0 +1,3 @@
+# Fingerprints of confirmed false-positive secret matches go here.
+# Generate a fingerprint by running: gitleaks detect --no-git -v
+# Do NOT add real secrets here to "ignore" them — rotate and remove instead.
