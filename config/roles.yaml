@@ -1,0 +1,46 @@
+# Per-agent LLM provider routing.
+# provider options: anthropic | openai | ollama | mlx | opencode
+# Route cheap/high-volume tasks locally, reserve cloud for quality-sensitive tasks.
+
+scout_summarizer:
+  provider: ollama
+  model: qwen2.5:14b
+  base_url: http://localhost:11434/v1
+
+scorer:
+  # Not an LLM call at all — Scorer delegates to n8n/Hermes (see ADR-0001).
+  # Left here as a placeholder in case a local fallback scorer is added later.
+  provider: n8n_webhook
+  webhook_url: ${N8N_SCORER_WEBHOOK_URL}
+
+writer_resume_assembly:
+  provider: n8n_webhook
+  webhook_url: ${N8N_RESUME_WEBHOOK_URL}
+
+writer_coverletter:
+  provider: anthropic
+  model: claude-sonnet-5
+
+networker_contact_research:
+  provider: ollama
+  model: qwen2.5:14b
+  base_url: http://localhost:11434/v1
+
+networker_email_draft:
+  provider: anthropic
+  model: claude-sonnet-5
+
+analyst_weekly_report:
+  provider: ollama
+  model: qwen2.5:14b
+  base_url: http://localhost:11434/v1
+
+# MLX example (Apple Silicon native inference), if preferred over Ollama for a role:
+# scout_summarizer:
+#   provider: mlx
+#   model: mlx-community/Qwen2.5-14B-Instruct-4bit
+
+# OpenCode example, if used as a coding/dev-assistant role rather than a data role:
+# dev_assistant:
+#   provider: opencode
+#   model: <model-name-per-opencode-config>

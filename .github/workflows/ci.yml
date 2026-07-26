@@ -1,0 +1,16 @@
+# Placeholder CI. Fill in once Phase 1 has code + tests.
+# This is a good one to have an AI coding assistant draft for you once
+# you know your test runner (pytest, etc.) — CI YAML is rarely hand-written.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Add real test/lint steps once Phase 1 code lands"

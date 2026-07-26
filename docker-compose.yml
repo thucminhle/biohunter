@@ -1,0 +1,28 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_SECURE_COOKIE=false
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  # BioHunter app itself — uncomment once Phase 1 has a runnable entrypoint
+  # biohunter:
+  #   build: .
+  #   depends_on:
+  #     - ollama
+  #     - n8n
+  #   env_file: .env
+
+volumes:
+  ollama_data:
+  n8n_data:
