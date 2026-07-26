@@ -6,6 +6,18 @@ at the end of each work session.
 
 ## Copy-paste prompt for a new chat
 
+**Note: the repo is PRIVATE, so a new claude.ai chat cannot fetch it from the
+URL — web_fetch only works on public URLs.** Instead, attach these files
+directly to your first message (paperclip/attach in the chat UI):
+- README.md
+- docs/design/biotech-job-hunter-design.md
+- docs/ROADMAP.md
+- docs/adr/0001-thin-wrapper-around-n8n-hermes.md
+- docs/adr/0002-adopt-patterns-from-jht.md
+- CHANGELOG.md
+
+Then paste this prompt:
+
 ```
 I'm building "BioHunter" — a self-hosted, multi-agent job-hunting system for
 Bay Area biotech roles (Scout monitors company career pages directly, Scorer/
@@ -14,20 +26,19 @@ application forms for my approval, Networker finds contacts and drafts
 outreach, Analyst sends a weekly report — all human-approval-gated, no
 auto-submit/auto-send).
 
-Repo: https://github.com/thucminhle/biohunter
-
-Please read these files first for full context:
-- README.md (overview, tool stack, repo layout)
-- docs/design/biotech-job-hunter-design.md (full architecture)
-- docs/ROADMAP.md (build phases — I'm currently on Phase <FILL IN>)
-- docs/adr/ (decisions made and why — don't relitigate these without discussion)
-- CHANGELOG.md (what's already been built)
+I've attached my project's docs (README, design doc, roadmap, ADRs,
+changelog) — please read them for full context before we continue.
 
 My stack: VS Code, n8n, Docker, Turso (libSQL), Hermes Agent, Ollama/MLX/
 OpenCode for local models, Claude for cloud calls. macOS (M4, 24GB RAM).
 
 I want to start/continue: <DESCRIBE THE SPECIFIC TASK>
 ```
+
+**Alternative for future sessions:** consider using Claude Code instead of
+claude.ai chat for hands-on build work — it reads local files directly from
+disk with no upload/fetch step at all, which will matter more once there's
+actual application code to work on.
 
 ## Current state (update this each session)
 
