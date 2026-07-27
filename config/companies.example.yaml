@@ -1,0 +1,32 @@
+# Copy this to companies.yaml and fill in your actual target list.
+# companies.yaml is gitignored (see .gitignore) since it's a personal
+# target list, not shared config -- but the .example file documents the shape.
+#
+# ats_type: greenhouse | lever | ashby | null
+#   - If null, Scout falls back to structured HTML scraping using css_selector.
+# ats_slug: the identifier the ATS API uses for this company. Usually visible
+#   in the company's existing careers URL, e.g.:
+#     Greenhouse: boards.greenhouse.io/<slug>            -> ats_slug: <slug>
+#     Lever:      jobs.lever.co/<slug>                   -> ats_slug: <slug>
+#     Ashby:      jobs.ashbyhq.com/<slug>                -> ats_slug: <slug>
+
+companies:
+  - name: Example Biotech Inc
+    careers_url: "https://boards.greenhouse.io/examplebiotech"
+    ats_type: greenhouse
+    ats_slug: examplebiotech
+
+  - name: Example Lever Co
+    careers_url: "https://jobs.lever.co/examplelever"
+    ats_type: lever
+    ats_slug: examplelever
+
+  - name: Example Ashby Co
+    careers_url: "https://jobs.ashbyhq.com/exampleashby"
+    ats_type: ashby
+    ats_slug: exampleashby
+
+  - name: Example SelfHosted Biotech
+    careers_url: "https://www.examplebio.com/careers"
+    ats_type: null
+    css_selector: "a.job-listing"   # adjust once you inspect the page

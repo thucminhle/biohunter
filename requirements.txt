@@ -1,0 +1,5 @@
+libsql-experimental>=0.0.41
+requests>=2.32
+beautifulsoup4>=4.12
+PyYAML>=6.0
+python-dotenv>=1.0

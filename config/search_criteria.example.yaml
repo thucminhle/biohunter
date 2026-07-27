@@ -1,0 +1,48 @@
+# Copy this to search_criteria.yaml and edit for your actual search.
+# search_criteria.yaml is gitignored (personal), same as companies.yaml.
+#
+# This file is what makes BioHunter's *filtering* portable to a different
+# location or job domain without touching any code -- e.g. switching from
+# "Bay Area biotech" to "Vietnam AI automation" is just editing this file
+# and companies.yaml; nothing in src/ knows about biotech or the Bay Area.
+
+# Postings whose location contains ANY of these (case-insensitive substring
+# match) are kept. Empty list = no location filtering (all locations pass).
+location_include:
+  - "bay area"
+  - "san francisco"
+  - "south san francisco"
+  - "oakland"
+  - "san jose"
+  - "peninsula"
+  - "remote"
+
+# Postings whose location contains ANY of these are dropped, checked BEFORE
+# location_include. Useful for e.g. excluding a specific remote-but-not-really
+# location string a company uses.
+location_exclude: []
+
+# Title keywords to exclude -- same semantics as before (postdoc/intern/etc.)
+title_exclude:
+  - "postdoc"
+  - "post-doctoral"
+  - "post doctoral"
+  - "intern"
+  - "internship"
+  - "co-op"
+
+# Title keywords to require (any match). Empty list = no title-include filtering.
+title_include: []
+
+# --- Example for a completely different search (commented out) ---
+# location_include:
+#   - "vietnam"
+#   - "ho chi minh"
+#   - "hanoi"
+#   - "remote"
+# title_exclude:
+#   - "intern"
+# title_include:
+#   - "automation"
+#   - "rpa"
+#   - "ai engineer"
