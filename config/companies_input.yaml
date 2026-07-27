@@ -1,0 +1,7 @@
+companies:
+  - name: Genentech
+    careers_url: "https://careers.gene.com/us/en"
+  - name: Gilead Sciences
+    careers_url: "https://gilead.wd1.myworkdayjobs.com/gileadcareers"
+  - name: Denali Therapeutics
+    careers_url: "https://boards.greenhouse.io/denalitherapeutics"

@@ -40,22 +40,33 @@ claude.ai chat for hands-on build work — it reads local files directly from
 disk with no upload/fetch step at all, which will matter more once there's
 actual application code to work on.
 
-## Current state (update this each session)
+## Working with me
+
+- Comfortable with architecture/design decisions — no need to over-explain the "why," I'm usually the one asking for it.
+- Still building git/terminal fluency — give explicit step-by-step commands with expected output, one command at a time when troubleshooting rather than multi-line blocks.
+- I paste back exact terminal output, so use that to diagnose precisely rather than guessing.
+- Prefer file-based deliverables (single named file, not zipped folders) when the change is small — avoids nesting mistakes when copying into the repo.
+
+## Current state
+
+**Full detailed state lives in `docs/handoffs/` — read the most recent
+dated file there first** (currently: `2026-07-26-phase1-scout-complete.md`).
+This section just tracks the pointer + a one-line summary; don't duplicate
+the detailed state here.
 
 **Last updated:** 2026-07-26
-**Current phase:** Phase 1 — Scout + storage (not yet started)
-**Repo status:** Scaffold complete (README, ADRs 0001-0002, ROADMAP, config/roles.yaml,
-pre-commit secrets scanning). No application code yet.
-**Next concrete step:** Turso schema (companies/postings/applications/contacts/
-outreach_emails/conferences tables) + company registry + pick which ATS platforms
-(Greenhouse/Lever/Ashby) your target companies actually use.
+**Current phase:** Phase 1 (Scout + storage) — mostly complete; Phase 2 not started
+**One-line summary:** Scout works end-to-end for Workday-based companies
+(Genentech, Gilead confirmed live); ATS adapters exist for Greenhouse/
+Lever/Ashby/Workday; 8 of 10 target companies still need registry work;
+Denali Therapeutics is the active blocker. See the dated handoff file for
+full detail, known gaps, and exact next steps.
 
-## Habit going forward
+## When completing a phase or major feature
 
-At the end of each work session (or before closing a long chat), spend 2 minutes:
-1. Update "Current state" above
-2. Add a CHANGELOG.md entry for anything shipped
-3. Commit + push
-
-This keeps every future session — yours or a fresh AI chat's — able to pick up
-exactly where you left off by reading four files, not scrolling through history.
+Ask the AI session that did the work to generate a fresh handoff prompt
+(specific, detailed, includes exact file names/gaps/errors — not generic).
+Save it as `docs/handoffs/YYYY-MM-DD-short-description.md`, then update
+the "Current state" section above to point to it. This keeps a permanent,
+dated history of exactly where the project stood at each transition —
+same pattern as ADRs, but for state rather than decisions.
