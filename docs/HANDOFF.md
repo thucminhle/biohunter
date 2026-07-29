@@ -57,18 +57,13 @@ actual application code to work on.
 ## Current state
 
 **Full detailed state lives in `docs/handoffs/` — read the most recent
-dated file there first** (currently: `2026-07-29-phase1-registry-complete.md`).
-This section just tracks the pointer + a one-line summary; don't duplicate
-the detailed state here.
+   dated file there first** (currently: `2026-07-29-registry-8of10-adr3-drafted.md`).
 
 **Last updated:** 2026-07-29
 **Current phase:** Phase 1 (Scout + storage) — code-complete, registry in
 progress (5/10 target companies confirmed live, 505 postings tracked, 0
 errors); Phase 2 not started.
-**One-line summary:** Six ATS adapters now exist (Greenhouse, Lever,
-Ashby, Workday-multi-site, Jobvite, Jobsyn/NLX for federal-contractor
-companies); stale-posting detection added; 7 companies remain unresearched.
-See the dated handoff file for full detail, known gaps, and exact next steps.
+**One-line summary:** 8/10 target companies live (317 postings); Exelixis + Scribe need DevTools checks; ADR-0003 drafted for automating that via headless browser (not yet built).
 
 ## When completing a phase or major feature
 

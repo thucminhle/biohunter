@@ -4,3 +4,4 @@ __pycache__/
 data/
 config/companies.yaml
 .env
+.DS_Store
