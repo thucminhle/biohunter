@@ -5,6 +5,7 @@ src/biohunter/__init__.py
 src/biohunter/cli.py
 src/biohunter/config.py
 src/biohunter/db.py
+src/biohunter/detect_ats.py
 src/biohunter.egg-info/PKG-INFO
 src/biohunter.egg-info/SOURCES.txt
 src/biohunter.egg-info/dependency_links.txt
@@ -13,7 +14,10 @@ src/biohunter/ats/__init__.py
 src/biohunter/ats/ashby.py
 src/biohunter/ats/base.py
 src/biohunter/ats/greenhouse.py
+src/biohunter/ats/jobsyn.py
+src/biohunter/ats/jobvite.py
 src/biohunter/ats/lever.py
+src/biohunter/ats/workday.py
 src/biohunter/scout/__init__.py
 src/biohunter/scout/detector.py
 src/biohunter/scout/ratelimit.py

@@ -42,10 +42,14 @@ _COMPANIES_YAML = _REPO_ROOT / "config" / "companies.yaml"
 # (ats_type, regex). First capture group(s) become the slug.
 # Order matters: check the more specific host-based patterns before anything looser.
 _PATTERNS: list[tuple[str, re.Pattern]] = [
-    ("greenhouse", re.compile(r"boards(?:-api)?\.greenhouse\.io/(?:v1/boards/)?([a-zA-Z0-9_-]+)")),
+    # Greenhouse has two live front-end domains: the legacy "boards.greenhouse.io"
+    # and the newer "job-boards.greenhouse.io" -- both use the same underlying
+    # job-board token/slug and the same public JSON API, so one pattern covers both.
+    ("greenhouse", re.compile(r"(?:job-)?boards(?:-api)?\.greenhouse\.io/(?:v1/boards/)?([a-zA-Z0-9_-]+)")),
     ("lever", re.compile(r"jobs\.lever\.co/([a-zA-Z0-9_-]+)")),
     ("ashby", re.compile(r"jobs\.ashbyhq\.com/([a-zA-Z0-9_-]+)")),
     ("workday", re.compile(r"([a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)\.myworkdayjobs\.com/([a-zA-Z0-9_-]+)")),
+    ("jobvite", re.compile(r"jobs\.jobvite\.com/([a-zA-Z0-9_-]+)")),
 ]
 
 

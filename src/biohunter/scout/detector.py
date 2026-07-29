@@ -10,6 +10,12 @@ from ..db import get_connection, init_schema
 from . import scraper
 from .ratelimit import RateLimiter
 
+# A posting not seen in a Scout run for this many days is presumed closed/
+# filled and marked 'stale'. This only ever runs after a SUCCESSFUL fetch
+# for that company in the current pass -- a failed run tells us nothing
+# about which postings are still live, so it must never trigger staleness.
+STALE_AFTER_DAYS = 30
+
 
 @dataclasses.dataclass
 class ScoutResult:
@@ -59,6 +65,25 @@ def _upsert_postings(conn, company_id: int, postings: list[RawPosting]) -> int:
     return new_count
 
 
+def _mark_stale_postings(conn, company_id: int, run_time: datetime.datetime) -> int:
+    """Mark postings not seen in this company's last STALE_AFTER_DAYS worth
+    of successful Scout runs as 'stale'. Never touches postings you've
+    already progressed (status 'applied' or 'rejected') -- staleness here
+    means "no longer visible on the source", not a judgment on postings
+    you've already acted on. Returns count of postings newly marked stale.
+    """
+    cutoff = (run_time - datetime.timedelta(days=STALE_AFTER_DAYS)).isoformat()
+    cur = conn.execute(
+        """UPDATE postings SET status = 'stale'
+           WHERE company_id = ? AND status NOT IN ('applied', 'rejected', 'stale')
+           AND last_seen_at < ?""",
+        (company_id, cutoff),
+    )
+    conn.commit()
+    return cur.rowcount if cur.rowcount is not None else 0
+
+
+
 def run_scout(limiter: RateLimiter | None = None, db_path: str | None = None) -> list[ScoutResult]:
     """One Scout pass over every active company in the registry.
 
@@ -76,6 +101,7 @@ def run_scout(limiter: RateLimiter | None = None, db_path: str | None = None) ->
     results: list[ScoutResult] = []
     for company in load_companies():
         company_id = _get_or_create_company_id(conn, company)
+        run_time = datetime.datetime.now(datetime.timezone.utc)
         try:
             if company.ats_type and company.ats_type in REGISTRY:
                 adapter = REGISTRY[company.ats_type]
@@ -84,9 +110,10 @@ def run_scout(limiter: RateLimiter | None = None, db_path: str | None = None) ->
                 new_count = _upsert_postings(conn, company_id, postings)
                 conn.execute(
                     "UPDATE companies SET last_checked_at = ? WHERE id = ?",
-                    (datetime.datetime.now(datetime.timezone.utc).isoformat(), company_id),
+                    (run_time.isoformat(), company_id),
                 )
                 conn.commit()
+                _mark_stale_postings(conn, company_id, run_time)
                 results.append(
                     ScoutResult(company.name, "ats", new_count, len(postings))
                 )
@@ -125,9 +152,10 @@ def run_scout(limiter: RateLimiter | None = None, db_path: str | None = None) ->
 
                 conn.execute(
                     "UPDATE companies SET last_checked_at = ?, last_hash = ? WHERE id = ?",
-                    (datetime.datetime.now(datetime.timezone.utc).isoformat(), new_hash, company_id),
+                    (run_time.isoformat(), new_hash, company_id),
                 )
                 conn.commit()
+                _mark_stale_postings(conn, company_id, run_time)
                 results.append(ScoutResult(company.name, "scrape", new_count, new_count))
 
         except Exception as exc:  # noqa: BLE001 -- intentionally broad: one company's

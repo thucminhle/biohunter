@@ -27,20 +27,34 @@ class WorkdayAdapter(ATSAdapter):
         https://roche.wd3.myworkdayjobs.com/ROG-A2O-GENE
                 └────┬────┘                 └────┬────┘
                  subdomain                      site
+
+    Some companies (e.g. Denali Therapeutics) run SEVERAL separate Workday
+    career sites under one tenant rather than a single unified one -- e.g.
+    dnli.wd1.myworkdayjobs.com/Discovery, /Development, /Corporate_Positions,
+    /Internships all exist independently. For these, comma-separate the
+    site names:
+        ats_slug: "dnli.wd1/Discovery,Development,Corporate_Positions"
+    Postings from all listed sites are combined into one result set.
     """
 
     name = "workday"
 
     def fetch_postings(self, ats_slug: str) -> list[RawPosting]:
-        subdomain, _, site = ats_slug.partition("/")
-        if not subdomain or not site:
+        subdomain, _, sites_raw = ats_slug.partition("/")
+        if not subdomain or not sites_raw:
             raise ValueError(
-                f"workday ats_slug must be '{{subdomain}}/{{site}}', got: {ats_slug!r}"
+                f"workday ats_slug must be '{{subdomain}}/{{site}}[,{{site2}},...]', got: {ats_slug!r}"
             )
         tenant = subdomain.split(".")[0]
         host = f"{subdomain}.myworkdayjobs.com"
-        endpoint = f"https://{host}/wday/cxs/{tenant}/{site}/jobs"
 
+        postings: list[RawPosting] = []
+        for site in [s.strip() for s in sites_raw.split(",") if s.strip()]:
+            postings.extend(self._fetch_one_site(host, tenant, site))
+        return postings
+
+    def _fetch_one_site(self, host: str, tenant: str, site: str) -> list[RawPosting]:
+        endpoint = f"https://{host}/wday/cxs/{tenant}/{site}/jobs"
         postings: list[RawPosting] = []
         offset = 0
         while True:
