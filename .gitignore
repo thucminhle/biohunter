@@ -5,3 +5,6 @@ data/
 config/companies.yaml
 .env
 .DS_Store
+seed_qdrant.js
+Compiled_Cover_Letter_Qdrant_Ready.md
+Compiled_Resume_Qdrant_Ready.md

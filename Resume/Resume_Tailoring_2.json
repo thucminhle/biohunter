@@ -1,0 +1,909 @@
+{
+  "name": "Resume Tailoring \u2014 Module 1",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Tailor My Resume",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "jobs_block",
+              "fieldType": "textarea"
+            },
+            {
+              "fieldLabel": "enable_thinking",
+              "fieldType": "dropdown",
+              "defaultValue": "=",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Thorough (with thinking)"
+                  },
+                  {
+                    "option": "Fast (no thinking)"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -1520,
+        624
+      ],
+      "id": "8d8ac9ec-c318-4ae9-be40-28582cdfbfcc",
+      "name": "On form submission",
+      "webhookId": "572e3796-81b1-4357-b187-e5d72cc854d1"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.jobs_block.replace(/\\r\\n/g, '\\n');\nconst thinkFlag = $json.enable_thinking === 'Thorough (with thinking)';\nconst blocks = raw.split(/\\n*={3,}\\n*/).map(b => b.trim()).filter(Boolean);\n\nreturn blocks.map(block => {\n  const lines = block.split('\\n');\n  const companyLine = lines.find(l => l.toLowerCase().startsWith('company:'));\n  const company_name = companyLine ? companyLine.replace(/company:\\s*/i, '').trim() : 'Unknown';\n  const job_description = lines.filter(l => !l.toLowerCase().startsWith('company:')).join('\\n').trim();\n  return { json: { company_name, job_description, think: thinkFlag } };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1312,
+        624
+      ],
+      "id": "b9ae8cf8-b2f5-40ea-b675-aecf54e9c3a4",
+      "name": "split jobs"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gemma4:12b-mlx\",\n  stream: false,\n  think: $node[\"split jobs\"].json.think,\n  messages: [{\n    role: \"user\",\n    content: \"You are an ATS (applicant tracking system) scoring engine. Compare this resume content against the job description and return ONLY valid JSON, no other text, in this exact shape: {\\\"match_score\\\": <0-100 integer>, \\\"matched_keywords\\\": [...], \\\"missing_keywords\\\": [...]}.\\n\\nJob description:\\n\" + $node[\"split jobs\"].json.job_description +\n      \"\\n\\nResume content:\\n\" + $json.tailored_summary + \"\\n\" + $json.tailored_bullets\n  }]\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "2c910208-d2fd-4fd9-93ab-6555aee9c567",
+      "name": "score ATS"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const raw = $json.message.content;\nconst jsonMatch = raw.match(/\\{[\\s\\S]*\\}/);\nlet parsed = { match_score: null, matched_keywords: [], missing_keywords: [] };\nif (jsonMatch) {\n  try { parsed = JSON.parse(jsonMatch[0]); } catch (e) { /* keep default on failure */ }\n}\nreturn { json: { ...$('assemble draft resume').item.json, ats: parsed } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        0
+      ],
+      "id": "9c7d61fc-e972-47b8-93b7-39d4d2492437",
+      "name": "parse ATS score"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gemma4:12b-mlx\",\n  stream: false,\n  think: $node[\"split jobs\"].json.think,\n  messages: [{\n    role: \"user\",\n    content: \"You are a critical, experienced hiring manager. Review this tailored resume content against the job description below. Respond ONLY in Markdown, using exactly this structure:\\n\\n# Hiring Manager Review\\n## Overall Rating\\n<score>/10\\n## Strengths\\n- ...\\n## Weaknesses\\n- ...\\n## Missing Keywords\\n- ...\\n## Recommended Changes\\n1. ...\\n2. ...\\n3. ...\\n\\nJob description:\\n\" + $node[\"split jobs\"].json.job_description +\n      \"\\n\\nResume content:\\n\" + $node[\"assemble draft resume\"].json.tailored_summary + \"\\n\" + $node[\"assemble draft resume\"].json.tailored_bullets\n  }]\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        336,
+        0
+      ],
+      "id": "4ea793db-5b92-48e7-8f40-39fad117ff97",
+      "name": "critique resume"
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "review_markdown",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        800,
+        480
+      ],
+      "id": "d7efa53d-f875-4e86-9dce-f1604f607934",
+      "name": "Convert to File"
+    },
+    {
+      "parameters": {
+        "resume": "form",
+        "formTitle": "Approve Revision \u2014 {{ $json.company_name }}",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "additional_notes",
+              "fieldType": "textarea"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1232,
+        480
+      ],
+      "id": "a119fc1b-27ed-4570-bf3d-0e1803ec4ee3",
+      "name": "Wait",
+      "webhookId": "d9eda623-2e10-4d5e-9e67-35f81539a8eb"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gemma4:12b-mlx\",\n  stream: false,\n  think: $('split jobs').item.json.think,\n  messages: [{\n    role: \"user\",\n    content: `You are revising resume content based on hiring-manager feedback and ATS analysis.\nImprove wording, ordering, and keyword coverage ONLY within the existing sections below.\nDo not invent experience. Do not add or remove headings. Preserve measurable accomplishments.\n\nJob Description:\n${$('build review packet').item.json.job_description}\n\nCurrent Summary:\n${$('build review packet').item.json.tailored_summary}\n\nCurrent Bullets by Heading (JSON):\n${JSON.stringify($('parse bullet selection').item.json.validated_selection)}\n\nCurrent Skills:\n${JSON.stringify($('parse skills selection').item.json.validated_selection)}\n\nATS Analysis:\nScore: ${$('build review packet').item.json.ats.match_score}/100\nMissing keywords: ${($('build review packet').item.json.ats.missing_keywords || []).join(', ')}\n\nHiring Manager Critique:\n${$('build review packet').item.json.critique_markdown}\n\nAdditional notes from candidate: ${$json.additional_notes || 'None'}\n\nRespond with ONLY valid JSON, no markdown fences, no other text, in this exact shape:\n{\"revised_summary\": \"...\", \"revised_bullets\": {\"<heading>\": [\"...\", \"...\"]}, \"revised_skills\": [\"...\", \"...\"]}\nUse the EXACT same heading names as given above.`\n  }]\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1440,
+        480
+      ],
+      "id": "6c10f7cf-6f0f-4fe8-94f6-b280bd32af57",
+      "name": "revise draft"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "function stripFences(s) {\n  return String(s || '').replace(/^```json\\s*/i, '').replace(/^```\\s*/, '').replace(/```\\s*$/, '').trim();\n}\nlet parsed;\ntry {\n  parsed = JSON.parse(stripFences($json.message.content));\n} catch (e) {\n  parsed = { revised_summary: '', revised_bullets: {}, revised_skills: [] };\n}\n\nconst originalBullets = $('parse bullet selection').item.json.validated_selection;\nconst originalHeadings = Object.keys(originalBullets);\n\nconst revised_bullets = {};\nfor (const heading of originalHeadings) {\n  const chosen = parsed.revised_bullets && parsed.revised_bullets[heading];\n  revised_bullets[heading] = Array.isArray(chosen) && chosen.length > 0 ? chosen : originalBullets[heading];\n}\n\nconst originalSkills = $('parse skills selection').item.json.validated_selection;\nconst revised_skills = Array.isArray(parsed.revised_skills) && parsed.revised_skills.length > 0\n  ? parsed.revised_skills\n  : originalSkills;\n\nreturn {\n  json: {\n    revised_summary: parsed.revised_summary || $('build review packet').item.json.tailored_summary,\n    revised_bullets,\n    revised_skills\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1648,
+        480
+      ],
+      "id": "06536883-f9e5-4e00-a771-a0c7204f3614",
+      "name": "parse revised sections"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ats = $('parse ATS score').item.json.ats;\nconst company = $('split jobs').item.json.company_name;\nconst critique_markdown = $json.message.content;\n\nconst review_markdown = `# Resume Review \u2014 ${company}\n\n## Job Description\n${$('split jobs').item.json.job_description}\n\n## Tailored Resume Summary\n${$('assemble draft resume').item.json.tailored_summary}\n\n## Tailored Bullets\n${$('assemble draft resume').item.json.tailored_bullets}\n\n## Cover Letter\n${$('assemble draft resume').item.json.cover_letter}\n\n## ATS Analysis\n**Match score:** ${ats.match_score}/100\n\n**Matched keywords:** ${(ats.matched_keywords || []).join(', ')}\n\n**Missing keywords:** ${(ats.missing_keywords || []).join(', ')}\n\n---\n\n${critique_markdown}\n`;\n\nreturn {\n  json: {\n    company_name: company,\n    job_description: $('split jobs').item.json.job_description,\n    retrieved_bullets: $('assemble draft resume').item.json.retrieved_bullets,\n    tailored_summary: $('assemble draft resume').item.json.tailored_summary,\n    tailored_bullets: $('assemble draft resume').item.json.tailored_bullets,\n    cover_letter: $('assemble draft resume').item.json.cover_letter,\n    ats,\n    critique_markdown,\n    review_markdown,\n    think: $('split jobs').item.json.think\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        480
+      ],
+      "id": "822ad6b6-edb9-4967-94f3-9ff3f93323f4",
+      "name": "build review packet"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const fs = require('fs');\nconst filePath = `/data/reviews/${$('build review packet').item.json.company_name.replace(/\\s+/g, '_')}_${Date.now()}.md`;\nfs.writeFileSync(filePath, $('build review packet').item.json.review_markdown);\nreturn { json: { ...$('build review packet').item.json, file_path: filePath } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        480
+      ],
+      "id": "b7d3a44b-94ae-4c60-9872-a346672e3839",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const fs = require('fs');\nconst item = $('build review packet').item.json;\nconst revised = $json;\n\nconst companySlug = item.company_name.replace(/\\s+/g, '_');\nconst timestamp = Date.now();\n\nlet experienceSection = '';\nfor (const [heading, bullets] of Object.entries(revised.revised_bullets)) {\n  experienceSection += `### ${heading}\\n` + bullets.map(b => `- ${b}`).join('\\n') + '\\n\\n';\n}\nconst skillsSection = revised.revised_skills.map(s => `- ${s}`).join('\\n');\n\nconst always = {\n  career_history: item.career_history || $('format always-full sections').item.json.career_history,\n  education: item.education || $('format always-full sections').item.json.education,\n  publications: item.publications || $('format always-full sections').item.json.publications,\n  patents: item.patents || $('format always-full sections').item.json.patents,\n  honors: item.honors || $('format always-full sections').item.json.honors\n};\n\nconst resumeMarkdown = `# ${item.company_name} \u2014 Revised Resume\n\n## Summary\n${revised.revised_summary}\n\n## Career History\n${always.career_history}\n\n## Professional Experience\n${experienceSection.trim()}\n\n## Key Skills\n${skillsSection}\n\n## Education\n${always.education}\n\n## Selected Publications\n${always.publications}\n\n## Patents\n${always.patents}\n\n## Honors and Special Awards\n${always.honors}\n`;\n\nconst coverLetterMarkdown = `# ${item.company_name} \u2014 Cover Letter\n\n[Cover letter module not yet built \u2014 see roadmap]\n`;\n\nconst resumePath = `/data/reviews/${companySlug}_RESUME_${timestamp}.md`;\nconst coverPath = `/data/reviews/${companySlug}_COVER_LETTER_${timestamp}.md`;\n\nfs.writeFileSync(resumePath, resumeMarkdown);\nfs.writeFileSync(coverPath, coverLetterMarkdown);\n\nreturn { json: { ...revised, resume_file_path: resumePath, cover_letter_file_path: coverPath } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1856,
+        480
+      ],
+      "id": "9c453624-9768-4ec9-bc63-eef3ac23a34c",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:6333/collections/resume_content/points/scroll",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  filter: { must: [ { key: \"section_type\", match: { value: \"professional_summary\" } } ] },\n  limit: 20,\n  with_payload: true,\n  with_vector: false\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1104,
+        224
+      ],
+      "id": "7874c98a-7787-4d47-8859-54f1f2fc9512",
+      "name": "fetch summary catalog"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const points = $json.result.points;\n// ASSUMPTION: each point payload has { label, text }. Adjust field names here if seed_qdrant.js differs.\nconst catalog = points.map(p => ({ label: p.payload.label, text: p.payload.text }));\nconst catalog_text = catalog.map(c => `Label: ${c.label}\\nText: ${c.text}`).join('\\n\\n---\\n\\n');\n\nconst jd = $('split jobs').item.json.job_description;\nconst prompt = 'You are selecting exactly ONE pre-written resume summary paragraph that best matches this job description. '\n  + 'Choose one label from the catalog below verbatim -- do not edit, rephrase, merge, or invent. '\n  + 'Respond with ONLY valid JSON, no markdown code fences, no other text, in this exact shape: '\n  + '{\"selected_label\": \"<label>\"}.'\n  + '\\n\\nJob description:\\n' + jd\n  + '\\n\\nCatalog:\\n' + catalog_text;\n\nreturn { json: { catalog, catalog_text, prompt } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        224
+      ],
+      "id": "62612de2-4298-4679-bb10-4fa51698ca30",
+      "name": "format summary catalog"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gemma4:12b-mlx\",\n  stream: false,\n  think: $('split jobs').item.json.think,\n  messages: [{ role: \"user\", content: $json.prompt }]\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -688,
+        224
+      ],
+      "id": "ccae2167-4fed-40ee-871c-a8bd3f43ca4a",
+      "name": "select summary"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "function stripFences(s) {\n  return String(s || '').replace(/^```json\\s*/i, '').replace(/^```\\s*/, '').replace(/```\\s*$/, '').trim();\n}\nlet parsed;\ntry {\n  parsed = JSON.parse(stripFences($json.message.content));\n} catch (e) {\n  parsed = { selected_label: null };\n}\nconst catalog = $('format summary catalog').item.json.catalog;\nlet match = catalog.find(c => c.label === parsed.selected_label);\nif (!match) {\n  console.warn(`[Branch A] selected_label \"${parsed.selected_label}\" did not exact-match any catalog label (${catalog.map(c => c.label).join(', ')}). Falling back to first catalog entry \u2014 check n8n execution log.`);\n  match = catalog[0];\n}\nreturn { json: { tailored_summary: match.text, summary_label: match.label } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        224
+      ],
+      "id": "25fe158a-0018-4651-bf84-33b53f8cdf04",
+      "name": "parse summary selection"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:6333/collections/resume_content/points/scroll",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  filter: { must: [ { key: \"section_type\", match: { value: \"professional_experience_heading\" } } ] },\n  limit: 20,\n  with_payload: true,\n  with_vector: false\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1104,
+        480
+      ],
+      "id": "45baf852-4ef1-43d4-8183-9503a9f6ca8a",
+      "name": "fetch heading catalog"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const points = $json.result.points;\n// ASSUMPTION: heading catalog points have payload { heading }.\nconst headings = points.map(p => p.payload.heading);\nconst catalog_text = headings.map((h, i) => `${i + 1}. ${h}`).join('\\n');\n\nconst jd = $('split jobs').item.json.job_description;\nconst prompt = 'You are selecting which Professional Experience headings are relevant to this job description. '\n  + 'You may select headings from different resume flavors (e.g. an AI role and an LC-MS role can both draw headings) -- '\n  + 'cross-flavor hybrid combinations are allowed and expected when justified. Select only from the exact heading '\n  + 'catalog below, do not invent new headings. Respond with ONLY valid JSON, no markdown code fences, no other text, '\n  + 'in this exact shape: {\"selected_headings\": [\"<heading>\", ...]}.'\n  + '\\n\\nJob description:\\n' + jd\n  + '\\n\\nHeading catalog:\\n' + catalog_text;\n\nreturn { json: { headings, catalog_text, prompt } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        480
+      ],
+      "id": "a11f7fab-1156-447c-91e2-d29912e33a1e",
+      "name": "format heading catalog"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gemma4:12b-mlx\",\n  stream: false,\n  think: $('split jobs').item.json.think,\n  messages: [{ role: \"user\", content: $json.prompt }]\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -688,
+        480
+      ],
+      "id": "d216da0d-2f99-4911-a511-da9c62a2d311",
+      "name": "select headings"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "function stripFences(s) {\n  return String(s || '').replace(/^```json\\s*/i, '').replace(/^```\\s*/, '').replace(/```\\s*$/, '').trim();\n}\nlet parsed;\ntry {\n  parsed = JSON.parse(stripFences($json.message.content));\n} catch (e) {\n  parsed = { selected_headings: [] };\n}\nconst catalog = $('format heading catalog').item.json.headings;\nconst chosen = Array.isArray(parsed.selected_headings) ? parsed.selected_headings : [];\nconst valid = chosen.filter(h => catalog.includes(h));\nconst invalid = chosen.filter(h => !catalog.includes(h));\nif (invalid.length > 0) {\n  console.warn(`[Branch B pass 1] heading(s) not in catalog, dropped: ${JSON.stringify(invalid)}. Valid catalog: ${JSON.stringify(catalog)}`);\n}\nif (valid.length === 0) {\n  console.warn('[Branch B pass 1] no valid headings selected \u2014 falling back to full catalog to avoid an empty Experience section.');\n}\nreturn { json: { selected_headings: valid.length > 0 ? valid : catalog } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        480
+      ],
+      "id": "b24302ed-3eb3-4874-ae74-1647a149c465",
+      "name": "parse heading selection"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:6333/collections/resume_content/points/scroll",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  filter: {\n    must: [\n      { key: \"section_type\", match: { value: \"professional_experience_bullet\" } },\n      { key: \"heading\", match: { any: $json.selected_headings } }\n    ]\n  },\n  limit: 300,\n  with_payload: true,\n  with_vector: false\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -272,
+        480
+      ],
+      "id": "cae262d4-2a63-4cdc-a2a6-d344c9ce8a5a",
+      "name": "fetch bullets for headings"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const points = $json.result.points;\n// ASSUMPTION: bullet points have payload { heading, text } where heading matches the parent heading name exactly.\nconst grouped = {};\nfor (const p of points) {\n  const h = p.payload.heading;\n  if (!grouped[h]) grouped[h] = [];\n  grouped[h].push(p.payload.text);\n}\nlet catalog_text = '';\nfor (const [heading, bullets] of Object.entries(grouped)) {\n  catalog_text += `### ${heading}\\n`;\n  bullets.forEach((b, i) => { catalog_text += `${i + 1}. ${b}\\n`; });\n  catalog_text += '\\n';\n}\n\nconst jd = $('split jobs').item.json.job_description;\nconst prompt = 'You are selecting the most relevant bullets under each Professional Experience heading below, for this '\n  + 'job description. Copy selected bullets VERBATIM -- do not edit, merge, rephrase, or invent new bullets. You do '\n  + 'not need to select from every heading. Respond with ONLY valid JSON, no markdown code fences, no other text, in '\n  + 'this exact shape: {\"selected_bullets\": { \"<heading>\": [\"<verbatim bullet text>\", ...] } }.'\n  + '\\n\\nJob description:\\n' + jd\n  + '\\n\\nBullets by heading:\\n' + catalog_text;\n\nreturn { json: { grouped, catalog_text, prompt } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        480
+      ],
+      "id": "7783ac0c-045e-4856-a598-4a4437ebefb1",
+      "name": "format bullet catalog"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gemma4:12b-mlx\",\n  stream: false,\n  think: $('split jobs').item.json.think,\n  messages: [{ role: \"user\", content: $json.prompt }]\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        144,
+        480
+      ],
+      "id": "6c441726-4762-43ab-8289-9a51e2d60c92",
+      "name": "select bullets"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "function stripFences(s) {\n  return String(s || '').replace(/^```json\\s*/i, '').replace(/^```\\s*/, '').replace(/```\\s*$/, '').trim();\n}\nlet parsed;\ntry {\n  parsed = JSON.parse(stripFences($json.message.content));\n} catch (e) {\n  parsed = { selected_bullets: {} };\n}\nconst grouped = $('format bullet catalog').item.json.grouped;\nconst headingOrder = $('parse heading selection').item.json.selected_headings;\nlet tailored_bullets = '';\nconst validated_selection = {};\nfor (const heading of headingOrder) {\n  const catalogBullets = grouped[heading] || [];\n  const chosen = (parsed.selected_bullets && parsed.selected_bullets[heading]) || [];\n  const valid = chosen.filter(b => catalogBullets.some(cb => cb.trim() === String(b).trim()));\n  const invalid = chosen.filter(b => !catalogBullets.some(cb => cb.trim() === String(b).trim()));\n  if (invalid.length > 0) {\n    console.warn(`[Branch B pass 2] ${invalid.length} bullet(s) under \"${heading}\" did not exact-match the catalog and were dropped: ${JSON.stringify(invalid)}`);\n  }\n  if (valid.length > 0) {\n    validated_selection[heading] = valid;\n    tailored_bullets += `### ${heading}\\n` + valid.map(b => `- ${b}`).join('\\n') + '\\n\\n';\n  }\n}\nreturn { json: { tailored_bullets: tailored_bullets.trim(), validated_selection } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        352,
+        480
+      ],
+      "id": "2aa4a610-a550-4358-84ff-8e784f764588",
+      "name": "parse bullet selection"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:6333/collections/resume_content/points/scroll",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  filter: { must: [ { key: \"section_type\", match: { value: \"key_skills\" } } ] },\n  limit: 50,\n  with_payload: true,\n  with_vector: false\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1104,
+        784
+      ],
+      "id": "62d0a343-2b8e-47cb-83ac-217b94b21416",
+      "name": "fetch skills catalog"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const points = $json.result.points;\n// ASSUMPTION: skill points have payload { text } (one atomic skill bullet each).\nconst skills = points.map(p => p.payload.text);\nconst catalog_text = skills.map((s, i) => `${i + 1}. ${s}`).join('\\n');\n\nconst jd = $('split jobs').item.json.job_description;\nconst prompt = 'You are selecting the individual Key Skills bullets most relevant to this job description, from the '\n  + 'flat catalog below. Copy selected items VERBATIM -- do not edit, merge, or invent. Do not pull in unrelated '\n  + 'skills just because they share a category with a relevant one. Respond with ONLY valid JSON, no markdown code '\n  + 'fences, no other text, in this exact shape: {\"selected_skills\": [\"<verbatim skill text>\", ...]}.'\n  + '\\n\\nJob description:\\n' + jd\n  + '\\n\\nSkills catalog:\\n' + catalog_text;\n\nreturn { json: { skills, catalog_text, prompt } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        784
+      ],
+      "id": "84280ae0-39dd-4e9d-9433-01d9345e5946",
+      "name": "format skills catalog"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gemma4:12b-mlx\",\n  stream: false,\n  think: $('split jobs').item.json.think,\n  messages: [{ role: \"user\", content: $json.prompt }]\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -688,
+        784
+      ],
+      "id": "8b70bf9f-1cc0-4603-92dd-cc8c8715f71f",
+      "name": "select skills"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "function stripFences(s) {\n  return String(s || '').replace(/^```json\\s*/i, '').replace(/^```\\s*/, '').replace(/```\\s*$/, '').trim();\n}\nlet parsed;\ntry {\n  parsed = JSON.parse(stripFences($json.message.content));\n} catch (e) {\n  parsed = { selected_skills: [] };\n}\nconst catalog = $('format skills catalog').item.json.skills;\nconst chosen = Array.isArray(parsed.selected_skills) ? parsed.selected_skills : [];\nconst valid = chosen.filter(s => catalog.some(cs => cs.trim() === String(s).trim()));\nconst invalid = chosen.filter(s => !catalog.some(cs => cs.trim() === String(s).trim()));\nif (invalid.length > 0) {\n  console.warn(`[Branch C] ${invalid.length} skill(s) did not exact-match the catalog and were dropped: ${JSON.stringify(invalid)}`);\n}\nconst tailored_skills = valid.map(s => `- ${s}`).join('\\n');\nreturn { json: { tailored_skills, validated_selection: valid } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -480,
+        784
+      ],
+      "id": "5a525c31-e247-4934-8268-f19bfb5ec459",
+      "name": "parse skills selection"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:6333/collections/resume_content/points/scroll",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  filter: { must: [ { key: \"section_type\", match: { any: [\"career_history\", \"education\", \"patents\", \"honors_and_special_awards\", \"publications\"] } } ] },\n  limit: 20,\n  with_payload: true,\n  with_vector: false\n}) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1104,
+        976
+      ],
+      "id": "b2281d42-d994-4c9f-be47-430e31d1f0d0",
+      "name": "fetch always-full sections"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const points = $json.result.points;\n// ASSUMPTION: each always-full section is stored as one point with payload { section_type, text }.\n// Publications is 'conditional_full' \u2014 the industry-role skip gate isn't built yet (see roadmap item #3 area),\n// so it defaults to included here, matching the documented default-include behavior.\nconst bySection = {};\nfor (const p of points) {\n  bySection[p.payload.section_type] = p.payload.text;\n}\nreturn {\n  json: {\n    career_history: bySection.career_history || '',\n    education: bySection.education || '',\n    patents: bySection.patents || '',\n    honors: bySection.honors_and_special_awards || '',\n    publications: bySection.publications || ''\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        976
+      ],
+      "id": "3f3728c1-33d2-4160-b54f-256bcaca612a",
+      "name": "format always-full sections"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "numberInputs": 4,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        352,
+        880
+      ],
+      "id": "c700ea84-46fc-47e3-81af-96fdfcaabab5",
+      "name": "merge branches"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const summary = $('parse summary selection').item.json;\nconst bullets = $('parse bullet selection').item.json;\nconst skills = $('parse skills selection').item.json;\nconst always = $('format always-full sections').item.json;\n\nconst tailored_summary = summary.tailored_summary;\n\nconst tailored_bullets =\n  `## Career History\\n${always.career_history}\\n\\n` +\n  `## Professional Experience\\n${bullets.tailored_bullets}\\n\\n` +\n  `## Key Skills\\n${skills.tailored_skills}\\n\\n` +\n  `## Education\\n${always.education}\\n\\n` +\n  `## Selected Publications\\n${always.publications}\\n\\n` +\n  `## Patents\\n${always.patents}\\n\\n` +\n  `## Honors and Special Awards\\n${always.honors}`;\n\n// COVER LETTER MODULE \u2014 IMPLEMENTATION-READY DESIGN SPEC\n//\n// This module is intentionally OUT OF SCOPE for the current resume pipeline.\n// It must be built as its own separate branch/module, not folded into the\n// resume branches above. The `cover_letter` field below is a placeholder so\n// downstream nodes (build review packet / revise draft / file writers) do not\n// break on a missing field in the meantime.\n//\n// When implemented, follow this exact 2-pass architecture (mirrors the existing\n// \"select summary\" branch pattern, using the same verbatim-then-edit discipline):\n//\n// Pass 1 \u2014 Story selection (verbatim, no editing):\n//   - Create a new Qdrant collection for cover-letter stories.\n//   - Store each story as a point with payload { label, text, section_type: \"cover_letter_story\" }.\n//   - Add an HTTP node (mirror \"fetch summary catalog\"): POST to\n//     http://host.docker.internal:6333/collections/<new_collection_name>/points/scroll\n//     with filter { must: [ { key: \"section_type\", match: { value: \"cover_letter_story\" } } ] },\n//     limit: 20, with_payload: true, with_vector: false.\n//   - Add a Code node (mirror \"format summary catalog\"): read result.points, map to\n//     { label, text }, build a numbered/labeled catalog block, and construct the LLM\n//     prompt asking it to pick exactly ONE label verbatim (no rephrasing, no merging).\n//     Prompt shape: \"You are selecting exactly ONE pre-written cover-letter story...\"\n//     Request JSON shape: { \"selected_label\": \"<label>\" }.\n//   - Add an LLM HTTP node (mirror \"select summary\"): POST to Ollama with the prompt.\n//   - Add a Code node (mirror \"parse summary selection\"):\n//     * stripFences + JSON.parse the response,\n//     * exact-match selected_label against catalog labels,\n//     * fallback to first catalog entry on bad/unmatched label,\n//     * log a console.warn on fallback,\n//     * output the selected story text (verbatim) as e.g. `selected_story`.\n//\n// Pass 2 \u2014 Controlled editing around the selected story:\n//   - Add a Code node (or reuse the same node) that feeds into an LLM HTTP node.\n//   - Inputs to the prompt: JD, selected_story (verbatim from Pass 1), company_name,\n//     job_title (extracted from the jobs_block or passed through from split jobs).\n//   - LLM prompt instruction: \"Produce a cover letter in this exact 4-part structure,\n//     in this order, using the selected story as the core evidence. You may adjust\n//     wording and emphasis, but you must NOT invent new facts, employers, metrics,\n//     or accomplishments beyond what is in the selected story and the rest of the\n//     retrieved resume evidence.\"\n//   - Required 4-part structure (preserve this order):\n//     1. Introduction \u2014 name the job title + company, and how the candidate's\n//        experience aligns with the company's goals and the JD.\n//     2. Detailed story \u2014 the selected past-experience story, and how it aligns\n//        with the JD.\n//     3. Forward-looking impact \u2014 how the candidate would impact this job/company\n//        while fulfilling the role.\n//     4. Closing \u2014 gratitude and enthusiasm for the opportunity.\n//   - The LLM output is the final cover_letter string (plain text or Markdown).\n//\n// Wiring:\n//   - The new branch should run in parallel to (or after) the resume branches,\n//     feeding from the same \"split jobs\" output to get JD, company_name, etc.\n//   - Its final output (cover_letter string) should be merged into the payload\n//     that reaches \"build review packet\" and \"Code in JavaScript1\" (file writer)\n//     so the cover letter is included in review packets and saved to disk.\n//   - Do NOT change the resume section structure or the existing assemble_draft_resume\n//     logic; the cover letter is a separate field that travels alongside.\nconst cover_letter = '[COVER LETTER NOT YET GENERATED \u2014 being built as a separate module; see comment above for planned design.]';\n\nreturn { json: { tailored_summary, tailored_bullets, cover_letter } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        208
+      ],
+      "id": "f9fa147c-3018-4764-83f9-232bb210ff38",
+      "name": "assemble draft resume"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "split jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "split jobs": {
+      "main": [
+        [
+          {
+            "node": "fetch summary catalog",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "fetch heading catalog",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "fetch skills catalog",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "fetch always-full sections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "score ATS": {
+      "main": [
+        [
+          {
+            "node": "parse ATS score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parse ATS score": {
+      "main": [
+        [
+          {
+            "node": "critique resume",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "critique resume": {
+      "main": [
+        [
+          {
+            "node": "build review packet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "revise draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "revise draft": {
+      "main": [
+        [
+          {
+            "node": "parse revised sections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "build review packet": {
+      "main": [
+        [
+          {
+            "node": "Convert to File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parse revised sections": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fetch summary catalog": {
+      "main": [
+        [
+          {
+            "node": "format summary catalog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "format summary catalog": {
+      "main": [
+        [
+          {
+            "node": "select summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "select summary": {
+      "main": [
+        [
+          {
+            "node": "parse summary selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fetch heading catalog": {
+      "main": [
+        [
+          {
+            "node": "format heading catalog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "format heading catalog": {
+      "main": [
+        [
+          {
+            "node": "select headings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "select headings": {
+      "main": [
+        [
+          {
+            "node": "parse heading selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parse heading selection": {
+      "main": [
+        [
+          {
+            "node": "fetch bullets for headings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fetch bullets for headings": {
+      "main": [
+        [
+          {
+            "node": "format bullet catalog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "format bullet catalog": {
+      "main": [
+        [
+          {
+            "node": "select bullets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "select bullets": {
+      "main": [
+        [
+          {
+            "node": "parse bullet selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fetch skills catalog": {
+      "main": [
+        [
+          {
+            "node": "format skills catalog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "format skills catalog": {
+      "main": [
+        [
+          {
+            "node": "select skills",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "select skills": {
+      "main": [
+        [
+          {
+            "node": "parse skills selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fetch always-full sections": {
+      "main": [
+        [
+          {
+            "node": "format always-full sections",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parse summary selection": {
+      "main": [
+        [
+          {
+            "node": "merge branches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parse bullet selection": {
+      "main": [
+        [
+          {
+            "node": "merge branches",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "parse skills selection": {
+      "main": [
+        [
+          {
+            "node": "merge branches",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "format always-full sections": {
+      "main": [
+        [
+          {
+            "node": "merge branches",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "merge branches": {
+      "main": [
+        [
+          {
+            "node": "assemble draft resume",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "assemble draft resume": {
+      "main": [
+        [
+          {
+            "node": "score ATS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "2a2a8de8-5095-48fd-9b36-94e6ae4abe3d",
+  "meta": {
+    "instanceId": "e276c1a109a118fc665a8bf9b536bc73e98915d45427e5b80a42390c277bad65"
+  },
+  "nodeGroups": [],
+  "id": "seS64gcUPPa6NZmS",
+  "tags": []
+}
