@@ -1,3 +1,14 @@
+docs/adr/0005-async-webhook-contract-serialized-captain-queue.md
+docs/adr/0006-native-pipeline-auto-writer-static-report.md
+docs/handoffs/2026-08-05-n8n-python-parity-debugging.md
+docs/handoffs/2026-08-05-native-pipeline-port-step1-in-progress.md
+docs/handoffs/2026-08-05-starting-native-pipeline-port (1).md
+docs/handoffs/2026-08-06_BioHunter-Phase-2-Development.md
+endpoint_parity_test.py
+src/biohunter/llm.py
+src/biohunter/qdrant.py
+src/biohunter/selection.py
+src/biohunter/writer.py
 .env.example
 .github/workflows/ci.yml
 .gitignore
@@ -26,6 +37,7 @@ docs/design/biotech-job-hunter-design.md
 docs/handoffs/2026-07-26-phase1-scout-complete.md
 docs/handoffs/2026-07-29-phase1-registry-complete.md
 docs/handoffs/2026-07-29-registry-8of10-adr3-drafted.md
+docs/handoffs/2026-08-04-resume-pipeline-e2e-complete.md
 pyproject.toml
 requirements.txt
 schema.sql

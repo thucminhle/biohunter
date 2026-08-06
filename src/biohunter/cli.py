@@ -2,6 +2,9 @@
 Usage:
     python -m biohunter.cli run-scout
     python -m biohunter.cli list-postings [--exclude KEYWORD,...] [--include KEYWORD,...] [--company NAME]
+    python -m biohunter.cli verify-llm [--role ROLE ...] [--model ROLE=VALUE ...] [--include-anthropic]
+    python -m biohunter.cli verify-writer --company NAME [--title TITLE]
+        (--job-description TEXT | --job-description-file PATH) [--model ROLE=VALUE ...]
 """
 from __future__ import annotations
 
@@ -11,7 +14,9 @@ import json
 
 from .config import load_search_criteria
 from .db import get_connection, init_schema
+from .llm import LLMClient
 from .scout import run_scout
+from .writer import generate_draft
 
 # Fallback defaults if no search_criteria.yaml/example exists at all -- in
 # practice load_search_criteria() always finds at least the .example file.
@@ -36,6 +41,20 @@ def _log_run(conn, status: str, detail: str) -> None:
         (datetime.datetime.now(datetime.timezone.utc).isoformat(), status, detail),
     )
     conn.commit()
+
+
+def _parse_model_overrides(values: list[str]) -> dict[str, str]:
+    """Turns repeated --model role=value flags into the overrides dict
+    LLMClient expects. "value" can be a bare model name ("llama3.1:8b")
+    or "provider/model" ("ollama/llama3.1:8b") -- LLMClient decides which
+    based on whether there's a "/" in it, not this function."""
+    overrides: dict[str, str] = {}
+    for raw in values:
+        if "=" not in raw:
+            raise ValueError(f"--model expects role=value, got: {raw!r}")
+        role, value = raw.split("=", 1)
+        overrides[role.strip()] = value.strip()
+    return overrides
 
 
 def cmd_run_scout(_args: argparse.Namespace) -> None:
@@ -123,6 +142,85 @@ def cmd_list_postings(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_verify_llm(args: argparse.Namespace) -> None:
+    """Step 0 smoke test: send one trivial message through every role
+    (or just the ones named with --role) and print what comes back, so
+    a broken base_url/model/API key shows up here instead of mid-port
+    inside a selection branch. Anthropic-backed roles are skipped by
+    default since they cost real (if tiny) money -- pass
+    --include-anthropic once a key is set up and you're ready to spend
+    a few cents confirming it."""
+    overrides = _parse_model_overrides(args.model or [])
+    client = LLMClient(overrides=overrides)
+
+    if args.role:
+        roles_to_test = args.role
+    else:
+        roles_to_test = [
+            name for name, cfg in client.roles.items()
+            if args.include_anthropic or cfg.get("provider") != "anthropic"
+        ]
+
+    for role in roles_to_test:
+        cfg = client.roles.get(role, {})
+        provider = cfg.get("provider", "?")
+        if provider in ("n8n_webhook", "opencode"):
+            print(f"[{role}] skipped ({provider} has no LLMClient backend)")
+            continue
+        try:
+            response = client.complete(
+                role,
+                [{"role": "user", "content": "Reply with exactly one word: pong"}],
+            )
+            print(f"[{role}] {response.provider}/{response.model} -> {response.text.strip()!r}")
+        except Exception as exc:  # noqa: BLE001 - smoke test wants to see every failure, not just crash on the first
+            print(f"[{role}] FAILED: {exc}")
+
+
+def cmd_verify_writer(args: argparse.Namespace) -> None:
+    """Runs the full native Writer pipeline (writer.generate_draft) end
+    to end against one real posting and prints each section separately,
+    so you can read the summary/bullets/cover letter on their own rather
+    than as one undifferentiated block -- and so you can compare against
+    n8n's output for the same posting for a parity check (ADR-0006 step
+    1's stated goal).
+
+    Any selection-branch fallback or dropped-item warning (see
+    selection.py's docstrings for which branches fall back how) prints
+    to stderr automatically via Python logging's default handler -- no
+    extra logging setup needed here, but it means warnings show up
+    interleaved with this command's own print() output. That's
+    intentional: a fallback firing on a real posting is exactly the
+    signal a parity check is trying to catch, not noise to filter out.
+    """
+    if args.job_description_file:
+        with open(args.job_description_file, encoding="utf-8") as f:
+            job_description = f.read().strip()
+    elif args.job_description:
+        job_description = args.job_description.strip()
+    else:
+        raise SystemExit("verify-writer requires --job-description or --job-description-file")
+
+    overrides = _parse_model_overrides(args.model or [])
+    client = LLMClient(overrides=overrides)
+
+    draft = generate_draft(
+        client,
+        company_name=args.company,
+        job_title=args.title or "",
+        job_description=job_description,
+        think=args.think,
+    )
+
+    def _section(title: str, body: str) -> None:
+        print(f"\n{'-' * 70}\n{title}\n{'-' * 70}\n{body}\n")
+
+    print(f"\n{'=' * 70}\nWRITER DRAFT -- {draft.company_name} -- {draft.job_title or '(no title given)'}\n{'=' * 70}")
+    _section("TAILORED SUMMARY", draft.tailored_summary)
+    _section("TAILORED BULLETS (full resume body: career history, experience, skills, education, etc.)", draft.tailored_bullets)
+    _section("COVER LETTER", draft.cover_letter)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="biohunter")
     subparsers = parser.add_subparsers(required=True)
@@ -137,6 +235,36 @@ def main() -> None:
     p_list.add_argument("--company", help="Filter to a single company name")
     p_list.add_argument("--include-stale", action="store_true", help="Include postings not seen in 30+ days (presumed closed)")
     p_list.set_defaults(func=cmd_list_postings)
+
+    p_verify = subparsers.add_parser("verify-llm", help="Smoke-test every LLMClient role with a trivial round-trip call")
+    p_verify.add_argument("--role", action="append", help="Test only this role (repeatable). Default: all roles.")
+    p_verify.add_argument(
+        "--model", action="append",
+        help="Override a role's model for this run, e.g. --model writer_selection=llama3.1:8b "
+             "or --model writer_selection=ollama/llama3.1:8b. Repeatable.",
+    )
+    p_verify.add_argument("--include-anthropic", action="store_true", help="Also test anthropic-backed roles")
+    p_verify.set_defaults(func=cmd_verify_llm)
+
+    p_verify_writer = subparsers.add_parser(
+        "verify-writer",
+        help="Run the native Writer pipeline end-to-end against one real posting and print each section",
+    )
+    p_verify_writer.add_argument("--company", required=True, help="Company name, e.g. 'Genentech'")
+    p_verify_writer.add_argument("--title", help="Job title (optional -- used for cover-letter placeholder substitution)")
+    p_verify_writer.add_argument("--job-description", help="Job description text, inline")
+    p_verify_writer.add_argument("--job-description-file", help="Path to a file containing the job description")
+    p_verify_writer.add_argument(
+        "--model", action="append",
+        help="Override writer_selection's model for this run, e.g. --model writer_selection=llama3.1:8b. Repeatable.",
+    )
+    p_verify_writer.add_argument(
+        "--think", action="store_true",
+        help="Run every branch in 'Thorough (with thinking)' mode, matching n8n's think=true form option. "
+             "Default is 'Fast (no thinking)' (think=false) -- per 2026-08-05 parity debugging, this ran "
+             "~4-6x faster than omitting the flag (the prior, unintentional default) on the same prompt.",
+    )
+    p_verify_writer.set_defaults(func=cmd_verify_writer)
 
     args = parser.parse_args()
     args.func(args)

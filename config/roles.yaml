@@ -1,21 +1,30 @@
 # Per-agent LLM provider routing.
 # provider options: anthropic | openai | ollama | mlx | opencode
 # Route cheap/high-volume tasks locally, reserve cloud for quality-sensitive tasks.
+#
+# NOTE (2026-08-05, Step 1 parity debugging): ollama-provider base_urls
+# intentionally have NO /v1 suffix. LLMClient's Ollama backend
+# (OllamaNativeClient in llm.py) hits native /api/chat, not the OpenAI-
+# compatible /v1/chat/completions shim -- an isolated timing test found
+# the compat shim consistently slower at the same `think` setting (see
+# docs/handoffs/2026-08-05-n8n-python-parity-debugging.md). mlx_smoke_test
+# below keeps its /v1 suffix on purpose: oMLX has no native /api/chat
+# equivalent, it's OpenAI-compatible only.
 
 scout_summarizer:
   provider: ollama
   model: qwen2.5:14b
-  base_url: http://localhost:11434/v1
+  base_url: http://localhost:11434
 
-scorer:
-  # Not an LLM call at all — Scorer delegates to n8n/Hermes (see ADR-0001).
-  # Left here as a placeholder in case a local fallback scorer is added later.
-  provider: n8n_webhook
-  webhook_url: ${N8N_SCORER_WEBHOOK_URL}
-
-writer_resume_assembly:
-  provider: n8n_webhook
-  webhook_url: ${N8N_RESUME_WEBHOOK_URL}
+# Used by the 8 native selection branches (summary/headings/bullets/skills;
+# intro/story/impact/gratitude) and the cover-letter stitch pass. Matches the
+# n8n reference implementation's model exactly (gemma4:12b-mlx via Ollama on
+# :11434) for parity-checking during the port. Revisit once parity is
+# confirmed — nothing says this has to stay the model long-term.
+writer_selection:
+  provider: ollama
+  model: gemma4:12b-mlx
+  base_url: http://localhost:11434
 
 writer_coverletter:
   provider: anthropic
@@ -24,7 +33,7 @@ writer_coverletter:
 networker_contact_research:
   provider: ollama
   model: qwen2.5:14b
-  base_url: http://localhost:11434/v1
+  base_url: http://localhost:11434
 
 networker_email_draft:
   provider: anthropic
@@ -33,7 +42,19 @@ networker_email_draft:
 analyst_weekly_report:
   provider: ollama
   model: qwen2.5:14b
-  base_url: http://localhost:11434/v1
+  base_url: http://localhost:11434
+
+# Temporary — Step 0 verification only, not wired into anything real yet.
+# oMLX requires an API key on its OpenAI-compatible endpoint (Ollama doesn't).
+# Set it via: export OMLX_API_KEY=<key from the oMLX app>
+# Model name is the "Active now" name from oMLX's Status panel — confirm
+# against the actual /v1/models response once auth is working, since the
+# loaded-model display name isn't guaranteed to match the API's model id.
+mlx_smoke_test:
+  provider: mlx
+  model: gemma-4-12b-coder-fable5-composer2.5-4bit
+  base_url: http://127.0.0.1:8000/v1
+  api_key: ${OMLX_API_KEY}
 
 # MLX example (Apple Silicon native inference), if preferred over Ollama for a role:
 # scout_summarizer:
