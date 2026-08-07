@@ -39,16 +39,18 @@ writer_selection:
   # too small, sized to what THAT model actually needs, not a guess.
 
 writer_coverletter:
-  provider: anthropic
-  model: claude-sonnet-5
+  provider: ollama
+  model: gemma4:12b-mlx
+  base_url: http://localhost:11434
 
 # Critic's blind-review pass (ADR-0006 Phase 2 item #1). Routed to
 # Anthropic on the same reasoning as writer_coverletter and
 # networker_email_draft: quality-sensitive, low-volume, worth the cloud
 # cost. Change freely if you'd rather run this locally.
 critic_review:
-  provider: anthropic
-  model: claude-sonnet-5
+  provider: ollama
+  model: gemma4:12b-mlx
+  base_url: http://localhost:11434
 
 networker_contact_research:
   provider: ollama
@@ -56,8 +58,9 @@ networker_contact_research:
   base_url: http://localhost:11434
 
 networker_email_draft:
-  provider: anthropic
-  model: claude-sonnet-5
+  provider: ollama
+  model: gemma4:12b-mlx
+  base_url: http://localhost:11434
 
 analyst_weekly_report:
   provider: ollama

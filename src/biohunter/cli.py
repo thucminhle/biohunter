@@ -9,7 +9,7 @@ Usage:
         (--job-description TEXT | --job-description-file PATH) [--model ROLE=VALUE ...] [--think]
     python -m biohunter.cli verify-revision --company NAME [--title TITLE]
         (--job-description TEXT | --job-description-file PATH) [--model ROLE=VALUE ...]
-        [--revision-rounds N] [--think]
+        [--revision-rounds N] [--think] [--show-diff]
 """
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ import logging
 
 from .config import load_search_criteria
 from .db import get_connection, init_schema
-from .critic import critique_draft
+from .critic import critique_draft, parse_score
+from .diff import diff_revision_result
 from .llm import LLMClient
 from .revision import run_revision_loop
 from .scout import run_scout
@@ -271,6 +272,11 @@ def cmd_verify_critic(args: argparse.Namespace) -> None:
     )
 
     print(f"\n{'=' * 70}\nCRITIQUE -- {draft.company_name} -- {draft.job_title or '(no title given)'}\n{'=' * 70}\n{critique}\n")
+    score_result = parse_score(critique)
+    if score_result.score is not None:
+        print(f"Score: {score_result.score}/10 -- {score_result.rationale}\n")
+    else:
+        print("Score: unavailable (critique did not include a parseable SCORE: line)\n")
 
 
 def cmd_verify_revision(args: argparse.Namespace) -> None:
@@ -307,6 +313,24 @@ def cmd_verify_revision(args: argparse.Namespace) -> None:
         print(f"{'-' * 70}\nTAILORED BULLETS\n{'-' * 70}\n{rnd.draft.tailored_bullets}\n")
         print(f"{'-' * 70}\nCOVER LETTER\n{'-' * 70}\n{rnd.draft.cover_letter}\n")
         print(f"{'-' * 70}\nCRITIQUE\n{'-' * 70}\n{rnd.critique}\n")
+        score_result = parse_score(rnd.critique)
+        if score_result.score is not None:
+            print(f"Score: {score_result.score}/10 -- {score_result.rationale}\n")
+        else:
+            print("Score: unavailable (critique did not include a parseable SCORE: line)\n")
+
+    if args.show_diff:
+        round_diffs = diff_revision_result(result)
+        if not round_diffs:
+            print(f"\n{'=' * 70}\nDIFFS\n{'=' * 70}\nNo revisions ran (--revision-rounds 0) -- nothing to diff.\n")
+        for rd in round_diffs:
+            print(f"\n{'=' * 70}\nDIFF -- round {rd.round_from} -> round {rd.round_to}\n{'=' * 70}")
+            for sec in rd.sections:
+                print(f"\n{'-' * 70}\n{sec.section}\n{'-' * 70}")
+                if sec.changed:
+                    print(sec.diff_text)
+                else:
+                    print("(unchanged)")
 
 
 def main() -> None:
@@ -399,6 +423,14 @@ def main() -> None:
     p_verify_revision.add_argument(
         "--think", action="store_true",
         help="Run every round's Writer branches AND Critic review in 'Thorough (with thinking)' mode. Default: fast mode.",
+    )
+    p_verify_revision.add_argument(
+        "--show-diff", action="store_true",
+        help="After printing every round in full, also print a unified diff between each "
+             "consecutive pair of rounds (summary/bullets/cover letter diffed separately). "
+             "Unchanged sections print '(unchanged)' explicitly rather than being skipped -- "
+             "a section that never changes across rounds despite critique feedback is itself "
+             "a signal worth seeing, not noise to hide.",
     )
     p_verify_revision.set_defaults(func=cmd_verify_revision)
 

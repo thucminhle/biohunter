@@ -17,7 +17,13 @@ concern, not this module's.
 """
 from __future__ import annotations
 
+import logging
+import re
+from dataclasses import dataclass
+
 from .llm import LLMClient
+
+logger = logging.getLogger(__name__)
 
 # Fixed section headers the critique is asked to organize under. This
 # keeps the output skimmable and gives a revision loop (later) a
@@ -53,7 +59,27 @@ CRITIC_INSTRUCTION = (
     "## Overall Recommendation\n"
     "One short paragraph: submit as-is, submit with minor edits, or needs "
     "real revision -- and the single highest-leverage change to make if not "
-    "submitting as-is."
+    "submitting as-is.\n\n"
+    "## Score\n"
+    "Your honest assessment of how ready this draft is to submit for THIS "
+    "posting, as a single integer from 1 (not ready, needs a full rewrite) "
+    "to 10 (submit as-is, no changes needed). This must be the ONLY line "
+    "in this section -- no preamble, no extra commentary, exactly this "
+    "format and nothing else:\n"
+    "SCORE: <integer 1-10> -- <one-sentence rationale>"
+)
+
+# Matches the strict "SCORE: <int> -- <rationale>" line asked for above.
+# Deliberately tolerant of the dash character the model might use (-, --,
+# or an em/en dash) and of it possibly wrapping the score in some
+# other stray punctuation, since the other six headers in this same
+# prompt have already been observed drifting round-to-round (see the
+# 2026-08-07 handoff) -- the model complying with five words of format
+# instruction perfectly every time isn't something to assume without
+# evidence, so the regex is intentionally a little permissive rather
+# than a fragile exact match.
+_SCORE_LINE_RE = re.compile(
+    r"SCORE:\s*(\d{1,2})\s*[-\u2013\u2014:]+\s*(.+)", re.IGNORECASE
 )
 
 
@@ -92,3 +118,47 @@ def critique_draft(
 
     response = llm.complete(role, [{"role": "user", "content": prompt}], think=think)
     return response.text.strip()
+
+
+@dataclass
+class ScoreResult:
+    score: int | None  # 1-10, or None if the model's output didn't parse
+    rationale: str | None  # one sentence, or None alongside a None score
+
+
+def parse_score(critique_text: str) -> ScoreResult:
+    """Extracts the '## Score' section's SCORE: line from critique_draft()'s
+    output. Deliberately a separate function rather than folded into
+    critique_draft() itself or a change to that function's return type --
+    critique_draft() keeps returning the same freeform str it always has
+    (zero change for revision.py/cli.py's existing handling of it), and a
+    caller that wants the score calls this on the text it already has.
+
+    This is display-only by design (see the 2026-08-07 ATS Score
+    discussion) -- nothing in this project reads ScoreResult to decide
+    whether to keep revising. Never raises: a model that doesn't comply
+    with the SCORE: format degrades to ScoreResult(None, None) with a
+    warning logged, matching every other parse-with-fallback in this
+    project (see selection.py's parse_json_response) rather than
+    crashing a CLI command over a formatting miss in one section of an
+    otherwise-usable critique.
+    """
+    match = _SCORE_LINE_RE.search(critique_text or "")
+    if not match:
+        logger.warning(
+            "critique text has no parseable 'SCORE: <n> -- <rationale>' line "
+            "-- score will display as unavailable, but the rest of the "
+            "critique is unaffected."
+        )
+        return ScoreResult(score=None, rationale=None)
+
+    raw_score, rationale = match.group(1), match.group(2).strip()
+    score = int(raw_score)
+    if not (1 <= score <= 10):
+        logger.warning(
+            "critique's SCORE line parsed to %d, outside the requested 1-10 "
+            "range -- keeping it as-is rather than silently clamping, since "
+            "clamping would hide a prompt-compliance issue worth noticing.",
+            score,
+        )
+    return ScoreResult(score=score, rationale=rationale)

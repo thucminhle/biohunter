@@ -15,6 +15,15 @@ repos:
       - id: check-yaml
       - id: check-merge-conflict
 
+  - repo: local
+    hooks:
+      - id: update-file-tree
+        name: Regenerate docs/FILE_TREE.txt
+        entry: bash -c 'git ls-files | sort > docs/FILE_TREE.txt && git diff --exit-code -- docs/FILE_TREE.txt'
+        language: system
+        pass_filenames: false
+        always_run: true
+
 # Setup (one-time):
 #   pip install pre-commit --break-system-packages
 #   pre-commit install

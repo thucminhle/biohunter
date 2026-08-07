@@ -8,3 +8,4 @@ config/companies.yaml
 seed_qdrant.js
 Compiled_Cover_Letter_Qdrant_Ready.md
 Compiled_Resume_Qdrant_Ready.md
+.DS_Store

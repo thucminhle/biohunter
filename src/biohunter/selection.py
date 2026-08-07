@@ -277,8 +277,12 @@ def select_headings(
 BULLET_INSTRUCTION = (
     "You are selecting the most relevant bullets under each Professional Experience "
     "heading below, for this job description. Copy selected bullets VERBATIM -- do "
-    "not edit, merge, rephrase, or invent new bullets. You do not need to select from "
-    "every heading."
+    "not edit, merge, rephrase, or invent new bullets. You do not need to select "
+    "bullets from every heading -- but every heading listed below MUST still appear "
+    "as a key in your JSON response. If you don't want any bullets from a heading, "
+    "give it an empty array, e.g. \"Some Heading\": []. Never omit a heading's key "
+    "entirely -- a heading present with an empty array means 'no relevant bullets'; "
+    "a missing key is not a valid way to express that."
 )
 
 
@@ -325,8 +329,9 @@ def select_bullets(
     prompt = (
         f"{BULLET_INSTRUCTION} "
         'Respond with ONLY valid JSON, no markdown code fences, no other text, in '
-        'this exact shape: {"selected_bullets": { "<heading>": ["<verbatim bullet '
-        'text>", ...] } }.'
+        'this exact shape (one key per heading listed below, no headings omitted): '
+        '{"selected_bullets": { "<heading>": ["<verbatim bullet text>", ...], '
+        '"<heading with nothing relevant>": [] } }.'
         f"\n\nJob description:\n{job_description}"
         f"\n\nBullets by heading:\n{catalog_text}"
     )
@@ -349,6 +354,7 @@ def select_bullets(
 
     for heading in selected_headings:
         catalog_bullets = grouped.get(heading, [])
+        heading_key_present = heading in chosen
         picks = chosen.get(heading)
         picks = picks if isinstance(picks, list) else []
 
@@ -362,12 +368,46 @@ def select_bullets(
                 branch_name, len(invalid), heading, invalid,
             )
 
+        # These two cases used to log as one identical "0 were selected"
+        # message, which made it impossible to tell apart (without
+        # --debug) whether the model genuinely judged this heading
+        # irrelevant -- which the prompt explicitly permits ("You do not
+        # need to select from every heading") -- versus the heading's
+        # own key silently not matching between select_headings()'s
+        # output and this call's JSON response (e.g. a dropped "&",
+        # reworded punctuation, stray whitespace), which is a real bug
+        # rather than a model judgment call. Splitting them so the two
+        # failure modes are distinguishable from the warning text alone.
         if not valid and catalog_bullets:
-            logger.warning(
-                "[%s] heading %r had %d catalog bullet(s) available but 0 were "
-                "selected -- this heading will be omitted from the resume.",
-                branch_name, heading, len(catalog_bullets),
-            )
+            if not heading_key_present:
+                logger.warning(
+                    "[%s] heading %r had %d catalog bullet(s) available, but its "
+                    "key did not appear at all in the model's JSON response. Real "
+                    "heading-string mismatches (altered punctuation, quotes, "
+                    "whitespace) were ruled out via --debug on 2026-08-07 -- the "
+                    "model was omitting the key wholesale even when the heading "
+                    "string matched the catalog exactly elsewhere in the same "
+                    "response. BULLET_INSTRUCTION now explicitly requires every "
+                    "heading to appear as a key (empty array if nothing selected) "
+                    "to close that ambiguity -- if this still fires after that "
+                    "change, it's likely output-length/attention degradation on "
+                    "later headings in a single large completion, not a prompt- "
+                    "wording issue; consider splitting select_bullets() into one "
+                    "call per heading if this persists. Run with --debug to see "
+                    "the raw response.",
+                    branch_name, heading, len(catalog_bullets),
+                )
+            else:
+                logger.warning(
+                    "[%s] heading %r had %d catalog bullet(s) available, its key "
+                    "was present in the model's JSON response, but the model "
+                    "selected 0 of them -- this heading will be omitted from "
+                    "the resume. This may be a legitimate relevance judgment "
+                    "(the prompt permits skipping a heading's bullets) rather "
+                    "than a bug; if it looks wrong, run with --debug to see "
+                    "the model's actual picks for this heading.",
+                    branch_name, heading, len(catalog_bullets),
+                )
 
         if valid:
             validated_selection[heading] = valid
