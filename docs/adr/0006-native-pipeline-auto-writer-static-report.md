@@ -187,3 +187,5 @@ either way.
 5. Add `biohunter report` static HTML command.
 6. Only after 1–5 are working end-to-end: revisit borderline-score
    handling and whether a dynamic dashboard is actually wanted.
+
+Addendum (2026-08-07): the n8n export was deleted rather than retained. The original rationale (diffing against it if selection quality regressed) was superseded once the native pipeline was validated directly against real postings via Critic + the Revision Loop, making a diff-against-n8n fallback unnecessary in practice.
