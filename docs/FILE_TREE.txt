@@ -1,14 +1,3 @@
-docs/adr/0005-async-webhook-contract-serialized-captain-queue.md
-docs/adr/0006-native-pipeline-auto-writer-static-report.md
-docs/handoffs/2026-08-05-n8n-python-parity-debugging.md
-docs/handoffs/2026-08-05-native-pipeline-port-step1-in-progress.md
-docs/handoffs/2026-08-05-starting-native-pipeline-port (1).md
-docs/handoffs/2026-08-06_BioHunter-Phase-2-Development.md
-endpoint_parity_test.py
-src/biohunter/llm.py
-src/biohunter/qdrant.py
-src/biohunter/selection.py
-src/biohunter/writer.py
 .env.example
 .github/workflows/ci.yml
 .gitignore
@@ -33,11 +22,19 @@ docs/adr/0001-thin-wrapper-around-n8n-hermes.md
 docs/adr/0002-adopt-patterns-from-jht.md
 docs/adr/0003-automate-ats-discovery-for-scale.md
 docs/adr/0004-n8n-pipeline-production-ready.md
+docs/adr/0005-async-webhook-contract-serialized-captain-queue.md
+docs/adr/0006-native-pipeline-auto-writer-static-report.md
 docs/design/biotech-job-hunter-design.md
 docs/handoffs/2026-07-26-phase1-scout-complete.md
 docs/handoffs/2026-07-29-phase1-registry-complete.md
 docs/handoffs/2026-07-29-registry-8of10-adr3-drafted.md
 docs/handoffs/2026-08-04-resume-pipeline-e2e-complete.md
+docs/handoffs/2026-08-05-n8n-python-parity-debugging.md
+docs/handoffs/2026-08-05-native-pipeline-port-step1-in-progress.md
+docs/handoffs/2026-08-05-starting-native-pipeline-port (1).md
+docs/handoffs/2026-08-06_BioHunter-Phase-2-Development.md
+docs/handoffs/2026-08-07_BioHunter-Critic-Revision-Loop-Handoff.md
+endpoint_parity_test.py
 pyproject.toml
 requirements.txt
 schema.sql
@@ -58,12 +55,18 @@ src/biohunter/ats/lever.py
 src/biohunter/ats/workday.py
 src/biohunter/cli.py
 src/biohunter/config.py
+src/biohunter/critic.py
 src/biohunter/db.py
 src/biohunter/detect_ats.py
+src/biohunter/llm.py
+src/biohunter/qdrant.py
+src/biohunter/revision.py
 src/biohunter/scout/__init__.py
 src/biohunter/scout/detector.py
 src/biohunter/scout/ratelimit.py
 src/biohunter/scout/scraper.py
+src/biohunter/selection.py
+src/biohunter/writer.py
 tests/test_detector.py
 tests/test_scraper.py
 {src/.DS_Store
