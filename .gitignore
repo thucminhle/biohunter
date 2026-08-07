@@ -3,9 +3,12 @@ __pycache__/
 .venv/
 data/
 config/companies.yaml
+config/search_criteria.yaml
 .env
 .DS_Store
 seed_qdrant.js
 Compiled_Cover_Letter_Qdrant_Ready.md
 Compiled_Resume_Qdrant_Ready.md
 .DS_Store
+*.egg-info/
+*.egg-info/

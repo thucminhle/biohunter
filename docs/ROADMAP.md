@@ -13,32 +13,65 @@ Mirror these phases as GitHub Issues with checkboxes so progress is visible outs
 - [ ] Jobvite pagination fix ("Show More" not followed — large categories may undercount)
 - [ ] `--profile` flag for concurrent multi-search — still open, low priority
 
-## Phase 2 — Scorer/Writer hooks
-**n8n + Hermes pipeline confirmed production-ready end-to-end as of 2026-08-04
-— see ADR-0004 and `docs/handoffs/2026-08-04-resume-pipeline-e2e-complete.md`.
-Phase 2 is now unblocked; three integration decisions from ADR-0004 should be
-resolved before webhook code is written, not mid-integration:**
-- [ ] Decide trigger shape — add/confirm an n8n Webhook trigger node (pipeline
-      currently uses `On form submission`) (ADR-0004 #1)
-- [ ] Decide webhook request/response contract — what BioHunter posts in vs.
-      what the pipeline returns (section text vs. file paths vs. assembled
-      cover letter pre/post stitch pass) (ADR-0004 #2)
-- [ ] Design Captain's handling of the pipeline's per-execution (not
-      per-item) human-approval Wait step before allowing concurrent Writer
-      calls (ADR-0004 #3)
-- [ ] n8n webhook client for scoring
-- [ ] n8n webhook client for resume assembly
-- [ ] LLM call for cover letter + tailoring rationale (cloud model) —
-      **note: the n8n pipeline now generates the cover letter itself**
-      (8-branch intro/story/impact/gratitude selection + LLM stitch pass);
-      confirm whether this BioHunter-side item is still needed or is now
-      redundant with what the webhook returns
-- [ ] Error handling: retry + stall-flagging if n8n unreachable — design
-      around the specific failure mode in ADR-0004 (host-resource-contention-
-      driven n8n unresponsiveness), not just generic downtime (ADR-0001)
-- [ ] Critic step: blind-review pass on Writer's output using a local model
-      (no shared context with Writer's prompt) — see ADR-0002
-- [ ] Lightweight weekly cloud token/cost log — see ADR-0002
+## Phase 2 — Writer + Critic (native pipeline)
+**Superseded architecture note:** this section originally tracked integration
+decisions for calling the n8n + Hermes pipeline over a webhook (n8n confirmed
+production-ready as of 2026-08-04, ADR-0004). ADR-0006 (2026-08-05) retired
+n8n from BioHunter's runtime path entirely and ported its logic natively
+into Writer/Critic instead — there is no second process to call, so the
+webhook trigger/contract/Captain-Wait-step decisions, the separate n8n
+webhook clients for scoring and resume assembly, and the standalone
+"LLM call for cover letter" item below are no longer applicable and have
+been removed from this list. ADR-0001 is marked Superseded and ADR-0005 is
+marked moot by ADR-0006 — see that ADR for the full reasoning; the n8n
+workflow itself is kept as a reference implementation, not deleted.
+
+- [x] Native pipeline port — Qdrant retrieval + all 8 selection branches
+      (resume: summary/headings/bullets/skills; cover letter:
+      intro/story/impact/gratitude) + cover-letter stitch pass, called
+      directly via `LLMClient` + Qdrant Python client against the existing
+      `resume_content` collection — `src/biohunter/writer.py`,
+      `selection.py`, `qdrant.py` (ADR-0006 build order step 1)
+- [x] Critic step — one blind-review LLM call over a completed draft,
+      organized under six fixed markdown headers, no shared context with
+      Writer's own prompt — `src/biohunter/critic.py` (ADR-0006 build order
+      step 2 / ADR-0002's originally-planned Critic step). Currently routed
+      to local Ollama rather than Anthropic, since there's no ongoing
+      Anthropic API access right now — revisit the cloud routing in
+      `config/roles.yaml` once that changes (see 2026-08-07 handoffs)
+- [x] Revision loop — Writer → Critic → revise → critique, configurable
+      round count, full round-by-round history returned —
+      `src/biohunter/revision.py`. Built as a natural extension once Critic
+      existed; not explicitly called out in ADR-0006's original build order
+- [x] Resume Diff — unified diff between any two rounds' output
+      (summary/bullets/cover letter diffed separately, unchanged sections
+      reported explicitly rather than omitted) — `src/biohunter/diff.py`
+- [x] Display-only ATS Score on Critic's output — a structured `SCORE: n/10`
+      line parsed out of the critique text. Deliberately **not** wired to
+      any auto-stop/plateau logic — an explicit scope decision (LLM-judged
+      scores aren't guaranteed monotonic; revisit only after watching real
+      score behavior across more postings, and even then keep a hard
+      max-rounds ceiling) — see the 2026-08-07 Diff-Score-BulletFix handoff
+- [ ] `awaiting_review` posting status + human-approval gate (ADR-0006 build
+      order step 3, replaces the old per-execution `Wait (Form)` design) —
+      not yet built; Critic/revision are deliberately persistence-agnostic
+      (no DB writes) specifically so this can be layered on without
+      changing either
+- [ ] Score-threshold config + Captain auto-trigger for Writer (ADR-0006
+      decision #2) — explicitly deferred until the gate above exists and is
+      confirmed working; borderline-score handling is an open question, not
+      decided by omission, per ADR-0006
+- [ ] `biohunter report` — static HTML activity report, no server (ADR-0006
+      decision #3, MVP scope) — not yet built; Resume Diff and Score above
+      now provide the data this needs, so this is a rendering task
+- [ ] Job-fit Scorer — ranks postings by scientific fit, location,
+      seniority, visa compatibility, salary, user preferences, run
+      *before* Writer to decide which postings are worth drafting for at
+      all (distinct from Critic's post-draft resume critique above) — not
+      yet built (2026-08-07 Critic/Revision handoff)
+- [ ] Lightweight weekly cloud token/cost log (ADR-0002) — not yet built;
+      lower urgency while running local-only given no ongoing Anthropic API
+      access right now
 
 ## Phase 3 — Analyst weekly report
 - [ ] Query layer: new postings, application status, outreach status
