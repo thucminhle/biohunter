@@ -5,16 +5,24 @@ Usage:
     python -m biohunter.cli verify-llm [--role ROLE ...] [--model ROLE=VALUE ...] [--include-anthropic]
     python -m biohunter.cli verify-writer --company NAME [--title TITLE]
         (--job-description TEXT | --job-description-file PATH) [--model ROLE=VALUE ...]
+    python -m biohunter.cli verify-critic --company NAME [--title TITLE]
+        (--job-description TEXT | --job-description-file PATH) [--model ROLE=VALUE ...] [--think]
+    python -m biohunter.cli verify-revision --company NAME [--title TITLE]
+        (--job-description TEXT | --job-description-file PATH) [--model ROLE=VALUE ...]
+        [--revision-rounds N] [--think]
 """
 from __future__ import annotations
 
 import argparse
 import datetime
 import json
+import logging
 
 from .config import load_search_criteria
 from .db import get_connection, init_schema
+from .critic import critique_draft
 from .llm import LLMClient
+from .revision import run_revision_loop
 from .scout import run_scout
 from .writer import generate_draft
 
@@ -221,8 +229,95 @@ def cmd_verify_writer(args: argparse.Namespace) -> None:
     _section("COVER LETTER", draft.cover_letter)
 
 
+def cmd_verify_critic(args: argparse.Namespace) -> None:
+    """Runs the full native Writer pipeline against one real posting
+    (same as verify-writer), then runs Critic's blind-review pass over
+    the resulting draft and prints the critique. Two separate --model
+    override sets are accepted since Writer and Critic are usually
+    different roles/providers (writer_selection is typically local,
+    critic_review is typically cloud) -- --model applies to both
+    LLMClient calls, so pass writer_selection=... and critic_review=...
+    together if you need to override either or both in one run.
+    """
+    if args.job_description_file:
+        with open(args.job_description_file, encoding="utf-8") as f:
+            job_description = f.read().strip()
+    elif args.job_description:
+        job_description = args.job_description.strip()
+    else:
+        raise SystemExit("verify-critic requires --job-description or --job-description-file")
+
+    overrides = _parse_model_overrides(args.model or [])
+    client = LLMClient(overrides=overrides)
+
+    draft = generate_draft(
+        client,
+        company_name=args.company,
+        job_title=args.title or "",
+        job_description=job_description,
+        think=args.think,
+    )
+
+    critique = critique_draft(
+        client,
+        "critic_review",
+        company_name=args.company,
+        job_title=args.title or "",
+        job_description=job_description,
+        tailored_summary=draft.tailored_summary,
+        tailored_bullets=draft.tailored_bullets,
+        cover_letter=draft.cover_letter,
+        think=args.think,
+    )
+
+    print(f"\n{'=' * 70}\nCRITIQUE -- {draft.company_name} -- {draft.job_title or '(no title given)'}\n{'=' * 70}\n{critique}\n")
+
+
+def cmd_verify_revision(args: argparse.Namespace) -> None:
+    """Runs the full revision loop (revision.run_revision_loop) against
+    one real posting and prints every round -- draft sections + critique
+    -- so you can watch what changes (or doesn't) round to round, same
+    "read every round, don't just trust the last one" spirit as
+    verify-writer's docstring on fallback warnings.
+    """
+    if args.job_description_file:
+        with open(args.job_description_file, encoding="utf-8") as f:
+            job_description = f.read().strip()
+    elif args.job_description:
+        job_description = args.job_description.strip()
+    else:
+        raise SystemExit("verify-revision requires --job-description or --job-description-file")
+
+    overrides = _parse_model_overrides(args.model or [])
+    client = LLMClient(overrides=overrides)
+
+    result = run_revision_loop(
+        client,
+        company_name=args.company,
+        job_title=args.title or "",
+        job_description=job_description,
+        revision_rounds=args.revision_rounds,
+        think=args.think,
+    )
+
+    for rnd in result.rounds:
+        label = "FIRST DRAFT" if rnd.round_number == 0 else f"REVISION {rnd.round_number}"
+        print(f"\n{'=' * 70}\n{label} -- {args.company} -- {args.title or '(no title given)'}\n{'=' * 70}")
+        print(f"\n{'-' * 70}\nTAILORED SUMMARY\n{'-' * 70}\n{rnd.draft.tailored_summary}\n")
+        print(f"{'-' * 70}\nTAILORED BULLETS\n{'-' * 70}\n{rnd.draft.tailored_bullets}\n")
+        print(f"{'-' * 70}\nCOVER LETTER\n{'-' * 70}\n{rnd.draft.cover_letter}\n")
+        print(f"{'-' * 70}\nCRITIQUE\n{'-' * 70}\n{rnd.critique}\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="biohunter")
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Log every LLM call's raw response text (logger.debug across selection.py) "
+             "in addition to the normal warnings -- verbose, but shows exactly what a "
+             "model returned when a selection falls back or comes back empty, instead "
+             "of just that it did.",
+    )
     subparsers = parser.add_subparsers(required=True)
 
     p_scout = subparsers.add_parser("run-scout", help="Run one Scout pass over the company registry")
@@ -266,7 +361,49 @@ def main() -> None:
     )
     p_verify_writer.set_defaults(func=cmd_verify_writer)
 
+    p_verify_critic = subparsers.add_parser(
+        "verify-critic",
+        help="Run Writer end-to-end against one real posting, then Critic's blind-review pass over the result",
+    )
+    p_verify_critic.add_argument("--company", required=True, help="Company name, e.g. 'Genentech'")
+    p_verify_critic.add_argument("--title", help="Job title (optional)")
+    p_verify_critic.add_argument("--job-description", help="Job description text, inline")
+    p_verify_critic.add_argument("--job-description-file", help="Path to a file containing the job description")
+    p_verify_critic.add_argument(
+        "--model", action="append",
+        help="Override a role's model for this run (writer_selection=..., critic_review=..., etc). Repeatable.",
+    )
+    p_verify_critic.add_argument(
+        "--think", action="store_true",
+        help="Run Writer's branches AND Critic's review in 'Thorough (with thinking)' mode. Default: fast mode.",
+    )
+    p_verify_critic.set_defaults(func=cmd_verify_critic)
+
+    p_verify_revision = subparsers.add_parser(
+        "verify-revision",
+        help="Run the full Writer<->Critic revision loop against one real posting and print every round",
+    )
+    p_verify_revision.add_argument("--company", required=True, help="Company name, e.g. 'Genentech'")
+    p_verify_revision.add_argument("--title", help="Job title (optional)")
+    p_verify_revision.add_argument("--job-description", help="Job description text, inline")
+    p_verify_revision.add_argument("--job-description-file", help="Path to a file containing the job description")
+    p_verify_revision.add_argument(
+        "--model", action="append",
+        help="Override a role's model for this run (writer_selection=..., critic_review=..., etc). Repeatable.",
+    )
+    p_verify_revision.add_argument(
+        "--revision-rounds", type=int, default=1,
+        help="Number of revision rounds AFTER the first draft (default: 1). "
+             "0 runs Writer once and Critic once, no revision.",
+    )
+    p_verify_revision.add_argument(
+        "--think", action="store_true",
+        help="Run every round's Writer branches AND Critic review in 'Thorough (with thinking)' mode. Default: fast mode.",
+    )
+    p_verify_revision.set_defaults(func=cmd_verify_revision)
+
     args = parser.parse_args()
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARNING)
     args.func(args)
 
 

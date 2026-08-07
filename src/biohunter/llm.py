@@ -83,11 +83,32 @@ class OllamaNativeClient:
         # Same timeout-extraction reasoning as OpenAICompatibleClient below.
         timeout = kwargs.pop("timeout", 300)
 
+        # json_mode is a backend-agnostic flag (see LLMBackend callers in
+        # selection.py) -- this class is the one that knows Ollama's native
+        # /api/chat spells it "format": "json". Added 2026-08-06 after a
+        # real-posting run showed writer_selection (gemma4:12b-mlx) silently
+        # returning non-conforming JSON on the skills/summary/heading/bullet
+        # branches (a whole catalog echoed back as one string, "None" where
+        # a label was expected, etc.) with no error -- format:"json" makes
+        # Ollama constrain generation to valid JSON instead of hoping the
+        # model complies from instructions alone.
+        json_mode = kwargs.pop("json_mode", False)
+
+        # See LLMClient.complete()'s num_ctx comment. Ollama's native
+        # /api/chat takes this nested under "options", not as a
+        # top-level field -- easy to get wrong by just payload.update()-
+        # ing it in with everything else, hence the explicit pop+nest.
+        num_ctx = kwargs.pop("num_ctx", None)
+
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": False,
         }
+        if json_mode:
+            payload["format"] = "json"
+        if num_ctx is not None:
+            payload["options"] = {"num_ctx": num_ctx}
         # `think` flows through here same as any other kwarg -- callers
         # pass it explicitly (see selection.py/writer.py), this class
         # doesn't need special-case handling for it, just like n8n's
@@ -141,11 +162,27 @@ class OpenAICompatibleClient:
         # -- raising the ceiling is the correct fix, not a band-aid.
         timeout = kwargs.pop("timeout", 300)
 
+        # See OllamaNativeClient.chat()'s json_mode comment -- same
+        # backend-agnostic flag, this class's dialect for it is OpenAI's
+        # response_format field rather than Ollama's format field.
+        # NOT YET VERIFIED against a real MLX/oMLX server -- test this
+        # explicitly if/when a role actually routes through this client.
+        json_mode = kwargs.pop("json_mode", False)
+
+        # num_ctx is Ollama-native-only (see OllamaNativeClient.chat()) --
+        # pop and drop it here so a role accidentally routed through this
+        # backend doesn't send a bogus top-level "num_ctx" field to an
+        # OpenAI-compatible server, which has no per-request equivalent
+        # (context length is server/model config, not a request field).
+        kwargs.pop("num_ctx", None)
+
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "stream": False,
         }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
         # Pass through anything else the caller supplied (e.g. the n8n
         # workflow's "think" flag) without this class needing to know
         # what it means. NOT YET VERIFIED against a real server that
@@ -261,6 +298,20 @@ class LLMClient:
         model = cfg["model"]
         base_url = _resolve_env(cfg.get("base_url"))
         api_key = _resolve_env(cfg.get("api_key"))
+
+        # num_ctx is role-level config (like base_url/api_key), not
+        # something every selection.py call needs to remember to pass.
+        # Added 2026-08-07: Ollama's own default context window per
+        # request can be far smaller than a model's advertised max
+        # (historically 2048-4096 tokens) unless explicitly set --
+        # meaning a role could be pointed at a 256K-context model and
+        # still silently truncate a long catalog+critique prompt if
+        # nothing sets num_ctx. Only meaningful for the ollama provider
+        # today (see OllamaNativeClient.chat()); other backends pop and
+        # ignore it. kwargs wins if a caller already passed one.
+        num_ctx = cfg.get("num_ctx")
+        if num_ctx is not None:
+            kwargs.setdefault("num_ctx", num_ctx)
 
         backend = self._get_backend(provider, base_url, api_key)
         return backend.chat(messages, model=model, **kwargs)

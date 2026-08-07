@@ -80,6 +80,7 @@ def select_variant(
     catalog: list[CatalogEntry],
     branch_name: str,
     think: bool = False,
+    critique_feedback: str | None = None,
 ) -> VariantSelection:
     """The shape shared by summary/intro/story/impact/gratitude: show the
     model a catalog of {label, text} entries, ask it to pick exactly one
@@ -103,6 +104,14 @@ def select_variant(
     closer to think=True, ~4-6x slower on the same prompt. Default here
     is False to match n8n's apparent actual runtime (~5 min end-to-end),
     not because "false" is obviously correct in the abstract.
+
+    critique_feedback: optional prior-round Critic output (see
+    revision.py). When given, it's appended as context so the model can
+    pick a DIFFERENT catalog label this round if the feedback warrants
+    -- the selection is still constrained to the catalog (never free
+    rewriting), matching every other branch's verbatim-only guarantee.
+    None (the default) reproduces the original prompt exactly, so this
+    param is a no-op for every existing (non-revision) caller.
     """
     prompt = (
         f"{instruction} "
@@ -111,8 +120,15 @@ def select_variant(
         f"\n\nJob description:\n{job_description}"
         f"\n\nCatalog:\n{_catalog_text(catalog)}"
     )
+    if critique_feedback:
+        prompt += (
+            f"\n\nA prior draft using this catalog was reviewed and received this "
+            f"feedback -- consider it, and select a different label than before if "
+            f"the feedback suggests a better fit exists in the catalog:\n{critique_feedback}"
+        )
 
-    response = llm.complete(role, [{"role": "user", "content": prompt}], think=think)
+    response = llm.complete(role, [{"role": "user", "content": prompt}], think=think, json_mode=True)
+    logger.debug("[%s] raw response: %r", branch_name, response.text)
     parsed = parse_json_response(response.text, default={"selected_label": None})
 
     selected_label = parsed.get("selected_label")
@@ -188,6 +204,7 @@ def select_headings(
     heading_payloads: list[dict],
     branch_name: str = "heading pass 1",
     think: bool = False,
+    critique_feedback: str | None = None,
 ) -> list[str]:
     """heading_payloads come from
     qdrant.fetch_by_section_type('professional_experience_heading').
@@ -199,6 +216,9 @@ def select_headings(
 
     think: see select_variant()'s docstring -- same parity-debugging
     finding applies to every branch, not just the variant-select ones.
+
+    critique_feedback: see select_variant()'s docstring -- same
+    no-op-when-None contract.
     """
     headings = [p.get("heading", "") for p in heading_payloads]
     catalog_text = "\n".join(f"{i + 1}. {h}" for i, h in enumerate(headings))
@@ -210,8 +230,14 @@ def select_headings(
         f"\n\nJob description:\n{job_description}"
         f"\n\nHeading catalog:\n{catalog_text}"
     )
+    if critique_feedback:
+        prompt += (
+            f"\n\nA prior draft using this catalog was reviewed and received this "
+            f"feedback -- consider it when choosing which headings to include:\n{critique_feedback}"
+        )
 
-    response = llm.complete(role, [{"role": "user", "content": prompt}], think=think)
+    response = llm.complete(role, [{"role": "user", "content": prompt}], think=think, json_mode=True)
+    logger.debug("[%s] raw response: %r", branch_name, response.text)
     parsed = parse_json_response(response.text, default={"selected_headings": []})
 
     chosen = parsed.get("selected_headings")
@@ -270,6 +296,7 @@ def select_bullets(
     bullet_payloads: list[dict],
     branch_name: str = "bullet pass 2",
     think: bool = False,
+    critique_feedback: str | None = None,
 ) -> BulletSelection:
     """bullet_payloads come from
     qdrant.fetch_by_section_type('professional_experience_bullet',
@@ -278,6 +305,10 @@ def select_bullets(
     Each payload has 'heading' + 'text'.
 
     think: see select_variant()'s docstring.
+
+    critique_feedback: see select_variant()'s docstring -- same
+    no-op-when-None contract. Particularly relevant here since Critic's
+    "Weak Bullets" section speaks directly to this branch's output.
     """
     grouped: dict[str, list[str]] = {}
     for p in bullet_payloads:
@@ -299,8 +330,15 @@ def select_bullets(
         f"\n\nJob description:\n{job_description}"
         f"\n\nBullets by heading:\n{catalog_text}"
     )
+    if critique_feedback:
+        prompt += (
+            f"\n\nA prior draft using this catalog was reviewed and received this "
+            f"feedback -- consider it, and select different bullets than before where "
+            f"the feedback flags a bullet as weak or missing relevant keywords:\n{critique_feedback}"
+        )
 
-    response = llm.complete(role, [{"role": "user", "content": prompt}], think=think)
+    response = llm.complete(role, [{"role": "user", "content": prompt}], think=think, json_mode=True)
+    logger.debug("[%s] raw response: %r", branch_name, response.text)
     parsed = parse_json_response(response.text, default={"selected_bullets": {}})
 
     chosen = parsed.get("selected_bullets")
@@ -322,6 +360,13 @@ def select_bullets(
                 "[%s] %d bullet(s) under %r did not exact-match the catalog and "
                 "were dropped: %s",
                 branch_name, len(invalid), heading, invalid,
+            )
+
+        if not valid and catalog_bullets:
+            logger.warning(
+                "[%s] heading %r had %d catalog bullet(s) available but 0 were "
+                "selected -- this heading will be omitted from the resume.",
+                branch_name, heading, len(catalog_bullets),
             )
 
         if valid:
@@ -360,6 +405,7 @@ def select_skills(
     skill_payloads: list[dict],
     branch_name: str = "skills",
     think: bool = False,
+    critique_feedback: str | None = None,
 ) -> SkillsSelection:
     """skill_payloads come from
     qdrant.fetch_by_section_type('key_skills'). Each payload has 'text'
@@ -367,7 +413,13 @@ def select_skills(
 
     think: see select_variant()'s docstring -- this is the exact branch
     the 2026-08-05 parity debugging session used to isolate the
-    endpoint/think findings, so its default matters most here."""
+    endpoint/think findings, so its default matters most here.
+
+    critique_feedback: see select_variant()'s docstring -- same
+    no-op-when-None contract. Particularly relevant here since Critic's
+    "ATS & Keyword Coverage" section (missing keywords) speaks directly
+    to this branch's output.
+    """
     skills = [p.get("text", "") for p in skill_payloads]
     catalog_text = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(skills))
 
@@ -378,8 +430,15 @@ def select_skills(
         f"\n\nJob description:\n{job_description}"
         f"\n\nSkills catalog:\n{catalog_text}"
     )
+    if critique_feedback:
+        prompt += (
+            f"\n\nA prior draft using this catalog was reviewed and received this "
+            f"feedback -- consider it, and select different/additional skills than "
+            f"before where the feedback flags missing keywords:\n{critique_feedback}"
+        )
 
-    response = llm.complete(role, [{"role": "user", "content": prompt}], think=think)
+    response = llm.complete(role, [{"role": "user", "content": prompt}], think=think, json_mode=True)
+    logger.debug("[%s] raw response: %r", branch_name, response.text)
     parsed = parse_json_response(response.text, default={"selected_skills": []})
 
     chosen = parsed.get("selected_skills")
@@ -392,6 +451,13 @@ def select_skills(
         logger.warning(
             "[%s] %d skill(s) did not exact-match the catalog and were dropped: %s",
             branch_name, len(invalid), invalid,
+        )
+
+    if not valid and skills:
+        logger.warning(
+            "[%s] %d catalog skill(s) available but 0 were selected -- Key Skills "
+            "section will be empty.",
+            branch_name, len(skills),
         )
 
     tailored_skills = "\n".join(f"- {s}" for s in valid)
@@ -467,8 +533,18 @@ def stitch_cover_letter(
     impact: VariantSelection,
     gratitude: VariantSelection,
     think: bool = False,
+    critique_feedback: str | None = None,
 ) -> str:
-    """think: see select_variant()'s docstring."""
+    """think: see select_variant()'s docstring.
+
+    critique_feedback: see select_variant()'s docstring -- same
+    no-op-when-None contract. This branch can only act on feedback via
+    its existing light-edit powers (transitions, trimming, placeholder
+    fill) -- it still cannot invent facts, so feedback calling for a
+    genuinely different story/impact/intro should be addressed by
+    re-running select_variant() for that section, not by leaning on
+    this pass to fix it via rewriting.
+    """
     prompt = (
         "You are lightly editing four pre-selected cover letter sections into one "
         "flowing letter.\n"
@@ -492,9 +568,38 @@ def stitch_cover_letter(
         "Respond with ONLY the final letter text, no preamble, no markdown fences, "
         "no section labels."
     )
+    if critique_feedback:
+        prompt += (
+            f"\n\nA prior version of this letter was reviewed and received this "
+            f"feedback -- address what you can within the light-edit constraints "
+            f"above (tone, transitions, redundancy), without inventing new facts:"
+            f"\n{critique_feedback}"
+        )
 
     response = llm.complete(role, [{"role": "user", "content": prompt}], think=think)
-    return response.text.strip()
+    logger.debug("[stitch] raw response: %r", response.text)
+    text = response.text.strip()
+
+    # DEFENSIVE: seen in practice (2026-08-06, Guardant Health run) -- despite
+    # "Respond with ONLY the final letter text, no preamble," the model
+    # sometimes prefixes its own meta-commentary ("Okay, here's the final
+    # letter text after addressing those points...") before the actual
+    # letter. If the response doesn't already open on a salutation line but
+    # contains one further down, cut everything before it. This is a
+    # narrow, letter-specific heuristic (cover letters conventionally open
+    # "Dear ...") -- it does not invent or alter any content, only trims a
+    # preamble the model was explicitly told not to produce.
+    if not re.match(r"^\s*Dear\b", text, re.IGNORECASE):
+        salutation = re.search(r"^\s*Dear\b.*$", text, re.IGNORECASE | re.MULTILINE)
+        if salutation:
+            logger.warning(
+                "[stitch] response had a leading preamble before the salutation "
+                "-- trimmed it: %r",
+                text[:salutation.start()].strip(),
+            )
+            text = text[salutation.start():].strip()
+
+    return text
 
 
 # ---------------------------------------------------------------------------

@@ -25,8 +25,28 @@ writer_selection:
   provider: ollama
   model: gemma4:12b-mlx
   base_url: http://localhost:11434
+  # num_ctx intentionally NOT set here as of 2026-08-07. It was set to
+  # 8192 earlier this session as a hedge against Ollama's conservative
+  # default context window, but a real run against this exact model
+  # (confirmed via `ollama ps`: 262144 context, no num_ctx override
+  # applied) produced clean output -- meaning gemma4:12b-mlx's own
+  # native/Modelfile default is already generous, and an explicit
+  # smaller value here would risk overriding it DOWNWARD rather than
+  # protecting against a too-small default, undoing exactly what it was
+  # meant to prevent. LLMClient/OllamaNativeClient still support num_ctx
+  # as role-level config (see llm.py) -- only add a value here again if
+  # this role gets pointed at a different model whose own default proves
+  # too small, sized to what THAT model actually needs, not a guess.
 
 writer_coverletter:
+  provider: anthropic
+  model: claude-sonnet-5
+
+# Critic's blind-review pass (ADR-0006 Phase 2 item #1). Routed to
+# Anthropic on the same reasoning as writer_coverletter and
+# networker_email_draft: quality-sensitive, low-volume, worth the cloud
+# cost. Change freely if you'd rather run this locally.
+critic_review:
   provider: anthropic
   model: claude-sonnet-5
 

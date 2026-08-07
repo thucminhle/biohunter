@@ -57,6 +57,7 @@ def generate_draft(
     job_title: str,
     job_description: str,
     think: bool = False,
+    critique_feedback: str | None = None,
 ) -> WriterDraft:
     """Runs the full 8-branch selection pipeline for one posting and
     returns the assembled draft. Mirrors n8n's node graph branch-for-
@@ -73,17 +74,30 @@ def generate_draft(
     omitting the flag (which behaves like True, not False), and roughly
     matches n8n's own observed ~5-minute end-to-end runtime. Pass
     think=True to run the "Thorough" mode instead.
+
+    critique_feedback: optional prior-round Critic output (see
+    revision.py's run_revision_loop()). None (the default) reproduces
+    the original first-draft behavior exactly -- every branch call
+    below only receives it when a caller explicitly passes it, so this
+    param is a no-op for every existing (non-revision) caller. When
+    given, it's forwarded to every branch that can act on it (all 8
+    selection calls); assemble_draft() itself has no LLM call to feed
+    it to.
     """
 
     # Branch A: resume summary (variant-select, fallback = first entry)
     summary_catalog = load_catalog(qdrant.fetch_by_section_type("professional_summary", limit=20))
     summary = select_variant(
-        llm, SELECTION_ROLE, SUMMARY_INSTRUCTION, job_description, summary_catalog, "summary", think=think
+        llm, SELECTION_ROLE, SUMMARY_INSTRUCTION, job_description, summary_catalog, "summary",
+        think=think, critique_feedback=critique_feedback,
     )
 
     # Branch B pass 1: headings (fallback = full catalog)
     heading_payloads = qdrant.fetch_by_section_type("professional_experience_heading", limit=20)
-    selected_headings = select_headings(llm, SELECTION_ROLE, job_description, heading_payloads, think=think)
+    selected_headings = select_headings(
+        llm, SELECTION_ROLE, job_description, heading_payloads,
+        think=think, critique_feedback=critique_feedback,
+    )
 
     # Branch B pass 2: bullets within the selected headings (no fallback)
     bullet_payloads = qdrant.fetch_by_section_type(
@@ -91,11 +105,17 @@ def generate_draft(
         limit=300,
         extra_filter={"key": "heading", "match": {"any": selected_headings}},
     )
-    bullets = select_bullets(llm, SELECTION_ROLE, job_description, selected_headings, bullet_payloads, think=think)
+    bullets = select_bullets(
+        llm, SELECTION_ROLE, job_description, selected_headings, bullet_payloads,
+        think=think, critique_feedback=critique_feedback,
+    )
 
     # Branch C: skills (no fallback)
     skill_payloads = qdrant.fetch_by_section_type("key_skills", limit=50)
-    skills = select_skills(llm, SELECTION_ROLE, job_description, skill_payloads, think=think)
+    skills = select_skills(
+        llm, SELECTION_ROLE, job_description, skill_payloads,
+        think=think, critique_feedback=critique_feedback,
+    )
 
     # Always-full sections: no LLM call, just fetch + reshape
     always_payloads = qdrant.fetch_by_section_type(ALWAYS_FULL_SECTION_TYPES, limit=20)
@@ -104,27 +124,31 @@ def generate_draft(
     # Cover letter branches: 4 independent variant-selects, then a stitch pass
     intro_catalog = load_catalog(qdrant.fetch_by_section_type("cover_letter_intro", limit=20))
     intro = select_variant(
-        llm, SELECTION_ROLE, INTRO_INSTRUCTION, job_description, intro_catalog, "cover letter intro", think=think
+        llm, SELECTION_ROLE, INTRO_INSTRUCTION, job_description, intro_catalog, "cover letter intro",
+        think=think, critique_feedback=critique_feedback,
     )
 
     story_catalog = load_catalog(qdrant.fetch_by_section_type("cover_letter_story", limit=20))
     story = select_variant(
-        llm, SELECTION_ROLE, STORY_INSTRUCTION, job_description, story_catalog, "cover letter story", think=think
+        llm, SELECTION_ROLE, STORY_INSTRUCTION, job_description, story_catalog, "cover letter story",
+        think=think, critique_feedback=critique_feedback,
     )
 
     impact_catalog = load_catalog(qdrant.fetch_by_section_type("cover_letter_impact", limit=20))
     impact = select_variant(
-        llm, SELECTION_ROLE, IMPACT_INSTRUCTION, job_description, impact_catalog, "cover letter impact", think=think
+        llm, SELECTION_ROLE, IMPACT_INSTRUCTION, job_description, impact_catalog, "cover letter impact",
+        think=think, critique_feedback=critique_feedback,
     )
 
     gratitude_catalog = load_catalog(qdrant.fetch_by_section_type("cover_letter_gratitude", limit=20))
     gratitude = select_variant(
         llm, SELECTION_ROLE, GRATITUDE_INSTRUCTION, job_description, gratitude_catalog,
-        "cover letter gratitude", think=think,
+        "cover letter gratitude", think=think, critique_feedback=critique_feedback,
     )
 
     cover_letter = stitch_cover_letter(
-        llm, SELECTION_ROLE, job_title, company_name, job_description, intro, story, impact, gratitude, think=think
+        llm, SELECTION_ROLE, job_title, company_name, job_description, intro, story, impact, gratitude,
+        think=think, critique_feedback=critique_feedback,
     )
 
     draft = assemble_draft(
