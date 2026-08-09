@@ -18,14 +18,26 @@ import datetime
 import json
 import logging
 
+from pathlib import Path
+
 from .config import load_search_criteria
 from .db import get_connection, init_schema
 from .critic import critique_draft, parse_score
 from .diff import diff_revision_result
 from .llm import LLMClient
+from .report import render_posting_report, report_id
 from .revision import run_revision_loop
 from .scout import run_scout
 from .writer import generate_draft
+
+# Where `biohunter report` writes its output HTML by default. Not yet
+# wired into any DB status (see ROADMAP's `awaiting_review` item) --
+# this command is a rendering pass over a fresh pipeline run, same
+# persistence-agnostic spirit as verify-revision, just to a file
+# instead of stdout. Kept as a plain module constant rather than a
+# search_criteria.yaml entry until there's a second thing (an index
+# page, say) that also needs to agree on where reports live.
+DEFAULT_REPORT_DIR = "reports"
 
 # Fallback defaults if no search_criteria.yaml/example exists at all -- in
 # practice load_search_criteria() always finds at least the .example file.
@@ -333,6 +345,84 @@ def cmd_verify_revision(args: argparse.Namespace) -> None:
                     print("(unchanged)")
 
 
+def cmd_report(args: argparse.Namespace) -> None:
+    """Runs the full Writer<->Critic revision loop against one real
+    posting (identical to verify-revision) and renders the result as a
+    single self-contained HTML file instead of printing to stdout.
+
+    This is the "single-posting report" piece of ADR-0006 decision #3 /
+    the ROADMAP's `biohunter report` item -- per the 2026-08-07 handoff's
+    explicit scoping, a multi-posting index is a separate, later piece
+    and is NOT built here; this command always renders exactly one
+    posting per run, same as verify-writer/verify-critic/verify-revision
+    already do.
+
+    Persistence-agnostic like every module it calls: nothing here writes
+    to the postings DB or touches `status`. It runs the pipeline fresh
+    and renders what came back -- if you want this report to reflect a
+    posting already sitting in the DB at some status, that wiring is
+    still open (see ROADMAP's `awaiting_review` item).
+    """
+    if args.job_description_file:
+        with open(args.job_description_file, encoding="utf-8") as f:
+            job_description = f.read().strip()
+    elif args.job_description:
+        job_description = args.job_description.strip()
+    else:
+        raise SystemExit("report requires --job-description or --job-description-file")
+
+    overrides = _parse_model_overrides(args.model or [])
+    client = LLMClient(overrides=overrides)
+
+    result = run_revision_loop(
+        client,
+        company_name=args.company,
+        job_title=args.title or "",
+        job_description=job_description,
+        revision_rounds=args.revision_rounds,
+        think=args.think,
+    )
+    round_diffs = diff_revision_result(result)
+
+    # Informational only (see report.py's render_posting_report()
+    # docstring) -- mirrors LLMClient.complete()'s own override
+    # resolution (roles.yaml.py: "/" in an override swaps provider AND
+    # model, otherwise only the model swaps) so this can't drift from
+    # what the run actually did.
+    model_routing: dict[str, str] = {}
+    for role in ("writer_selection", "critic_review"):
+        if role not in client.roles:
+            continue
+        provider = client.roles[role]["provider"]
+        model = client.roles[role]["model"]
+        if role in overrides:
+            override_value = overrides[role]
+            if "/" in override_value:
+                provider, model = override_value.split("/", 1)
+            else:
+                model = override_value
+        model_routing[role] = f"{provider}/{model}"
+
+    html_out = render_posting_report(
+        result,
+        company_name=args.company,
+        job_title=args.title or "",
+        job_description=job_description,
+        round_diffs=round_diffs,
+        model_routing=model_routing,
+    )
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rid = report_id(args.company, args.title or "")
+    out_path = output_dir / f"{rid}.html"
+    out_path.write_text(html_out, encoding="utf-8")
+
+    final_score = parse_score(result.final_critique)
+    score_display = f"{final_score.score}/10" if final_score.score is not None else "unavailable"
+    print(f"Report written: {out_path}  (final score: {score_display}, {len(result.rounds)} round(s))")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="biohunter")
     parser.add_argument(
@@ -433,6 +523,34 @@ def main() -> None:
              "a signal worth seeing, not noise to hide.",
     )
     p_verify_revision.set_defaults(func=cmd_verify_revision)
+
+    p_report = subparsers.add_parser(
+        "report",
+        help="Run the Writer<->Critic revision loop against one real posting and render "
+             "a static HTML report (single posting; see docs/adr/0006 decision #3)",
+    )
+    p_report.add_argument("--company", required=True, help="Company name, e.g. 'Genentech'")
+    p_report.add_argument("--title", help="Job title (optional)")
+    p_report.add_argument("--job-description", help="Job description text, inline")
+    p_report.add_argument("--job-description-file", help="Path to a file containing the job description")
+    p_report.add_argument(
+        "--model", action="append",
+        help="Override a role's model for this run (writer_selection=..., critic_review=..., etc). Repeatable.",
+    )
+    p_report.add_argument(
+        "--revision-rounds", type=int, default=1,
+        help="Number of revision rounds AFTER the first draft (default: 1). "
+             "0 runs Writer once and Critic once, no revision.",
+    )
+    p_report.add_argument(
+        "--think", action="store_true",
+        help="Run every round's Writer branches AND Critic review in 'Thorough (with thinking)' mode. Default: fast mode.",
+    )
+    p_report.add_argument(
+        "--output-dir", default=DEFAULT_REPORT_DIR,
+        help=f"Directory to write the report HTML into (default: {DEFAULT_REPORT_DIR}/). Created if missing.",
+    )
+    p_report.set_defaults(func=cmd_report)
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.WARNING)

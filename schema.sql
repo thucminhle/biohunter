@@ -82,5 +82,29 @@ CREATE TABLE IF NOT EXISTS run_log (
     cost_usd    REAL
 );
 
+-- Added alongside the dashboard (the "dynamic dashboard" ADR-0006
+-- deferred, now built on direct request -- see docs/adr/0006). One row
+-- per generation RUN, not per posting: clicking "Regenerate" adds a
+-- new row rather than overwriting, so a posting's generation history
+-- is never lost even though the dashboard UI only surfaces the latest
+-- one today. `result_json` holds the full RevisionResult (final_draft,
+-- final_critique, every round) as JSON -- see drafts_db.py for the
+-- serialize/deserialize helpers. writer.py/critic.py/revision.py
+-- themselves are unchanged. `final_score` is denormalized from
+-- result_json (Critic's parsed SCORE line for the final round) purely
+-- so the dashboard's posting list can show a score badge without
+-- deserializing every draft's full JSON on every page load.
+-- NOTE FOR db.py's _split_statements(): no semicolons in comments
+-- above this line -- the naive splitter doesn't strip comments first.
+CREATE TABLE IF NOT EXISTS drafts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    posting_id      INTEGER NOT NULL REFERENCES postings(id),
+    generated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    revision_rounds INTEGER NOT NULL,   -- rounds AFTER the first draft, matching run_revision_loop()'s own param
+    final_score     INTEGER,            -- Critic's 1-10 score for the final round, NULL if unparseable
+    result_json     TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_postings_status ON postings(status);
 CREATE INDEX IF NOT EXISTS idx_postings_company ON postings(company_id);
+CREATE INDEX IF NOT EXISTS idx_drafts_posting ON drafts(posting_id);
