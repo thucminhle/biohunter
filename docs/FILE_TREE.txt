@@ -1,70 +1,86 @@
-.env.example
-.github/workflows/ci.yml
-.gitignore
-.gitleaksignore
-.pre-commit-config.yaml
-CHANGELOG.md
-LICENSE
-README.md
-config/companies.example.yaml
-config/companies_input.yaml
-config/roles.yaml
-config/search_criteria.example.yaml
-config/search_criteria.yaml
-docs/AST_OUTLINE.md
-docs/FILE_TREE.txt
-docs/HANDOFF.md
-docs/ROADMAP.md
-docs/adr/0000-adr-template.md
-docs/adr/0001-thin-wrapper-around-n8n-hermes.md
-docs/adr/0002-adopt-patterns-from-jht.md
-docs/adr/0003-automate-ats-discovery-for-scale.md
-docs/adr/0004-n8n-pipeline-production-ready.md
-docs/adr/0005-async-webhook-contract-serialized-captain-queue.md
-docs/adr/0006-native-pipeline-auto-writer-static-report.md
-docs/design/biotech-job-hunter-design.md
-docs/handoffs/2026-07-26-phase1-scout-complete.md
-docs/handoffs/2026-07-29-phase1-registry-complete.md
-docs/handoffs/2026-07-29-registry-8of10-adr3-drafted.md
-docs/handoffs/2026-08-04-resume-pipeline-e2e-complete.md
-docs/handoffs/2026-08-05-n8n-python-parity-debugging.md
-docs/handoffs/2026-08-05-native-pipeline-port-step1-in-progress.md
-docs/handoffs/2026-08-05-starting-native-pipeline-port.md
-docs/handoffs/2026-08-06_BioHunter-Phase-2-Development.md
-docs/handoffs/2026-08-07_BioHunter-Critic-Revision-Loop-Handoff.md
-docs/handoffs/2026-08-07_BioHunter-Diff-Score-BulletFix-Handoff.md
-docs/handoffs/2026-08-09_BioHunter-Dashboard-Filtering-ManualAdd-Handoff.md
-pyproject.toml
-requirements.txt
-schema.sql
-scripts/endpoint_parity_test.py
-src/biohunter/__init__.py
-src/biohunter/ats/__init__.py
-src/biohunter/ats/ashby.py
-src/biohunter/ats/base.py
-src/biohunter/ats/greenhouse.py
-src/biohunter/ats/jobsyn.py
-src/biohunter/ats/jobvite.py
-src/biohunter/ats/lever.py
-src/biohunter/ats/workday.py
-src/biohunter/cli.py
-src/biohunter/config.py
-src/biohunter/critic.py
-src/biohunter/dashboard.py
-src/biohunter/db.py
-src/biohunter/detect_ats.py
-src/biohunter/diff.py
-src/biohunter/drafts_db.py
-src/biohunter/llm.py
-src/biohunter/qdrant.py
-src/biohunter/report.py
-src/biohunter/resume_pdf.py
-src/biohunter/revision.py
-src/biohunter/scout/__init__.py
-src/biohunter/scout/detector.py
-src/biohunter/scout/ratelimit.py
-src/biohunter/scout/scraper.py
-src/biohunter/selection.py
-src/biohunter/writer.py
-tests/test_detector.py
-tests/test_scraper.py
+# Repository File Tree
+
+├── config
+│   ├── companies.example.yaml
+│   ├── companies.yaml
+│   ├── companies_input.yaml
+│   ├── roles.yaml
+│   ├── search_criteria.example.yaml
+│   └── search_criteria.yaml
+├── docs
+│   ├── adr
+│   │   ├── 0000-adr-template.md
+│   │   ├── 0001-thin-wrapper-around-n8n-hermes.md
+│   │   ├── 0002-adopt-patterns-from-jht.md
+│   │   ├── 0003-automate-ats-discovery-for-scale.md
+│   │   ├── 0004-n8n-pipeline-production-ready.md
+│   │   ├── 0005-async-webhook-contract-serialized-captain-queue.md
+│   │   └── 0006-native-pipeline-auto-writer-static-report.md
+│   ├── design
+│   │   └── biotech-job-hunter-design.md
+│   ├── handoffs
+│   │   ├── 2026-07-26-phase1-scout-complete.md
+│   │   ├── 2026-07-29-phase1-registry-complete.md
+│   │   ├── 2026-07-29-registry-8of10-adr3-drafted.md
+│   │   ├── 2026-08-04-resume-pipeline-e2e-complete.md
+│   │   ├── 2026-08-05-n8n-python-parity-debugging.md
+│   │   ├── 2026-08-05-native-pipeline-port-step1-in-progress.md
+│   │   ├── 2026-08-05-starting-native-pipeline-port.md
+│   │   ├── 2026-08-06_BioHunter-Phase-2-Development.md
+│   │   ├── 2026-08-07_BioHunter-Critic-Revision-Loop-Handoff.md
+│   │   ├── 2026-08-07_BioHunter-Diff-Score-BulletFix-Handoff.md
+│   │   └── 2026-08-09_BioHunter-Dashboard-Filtering-ManualAdd-Handoff.md
+│   ├── AST_OUTLINE.md
+│   ├── FILE_TREE.txt
+│   ├── HANDOFF.md
+│   └── ROADMAP.md
+├── scripts
+│   ├── endpoint_parity_test.py
+│   ├── generate_outline copy.py
+│   ├── generate_outline.py
+│   └── run_hooks.sh
+├── src
+│   └── biohunter
+│       ├── ats
+│       │   ├── __init__.py
+│       │   ├── ashby.py
+│       │   ├── base.py
+│       │   ├── greenhouse.py
+│       │   ├── jobsyn.py
+│       │   ├── jobvite.py
+│       │   ├── lever.py
+│       │   └── workday.py
+│       ├── scout
+│       │   ├── __init__.py
+│       │   ├── detector.py
+│       │   ├── ratelimit.py
+│       │   └── scraper.py
+│       ├── __init__.py
+│       ├── cli.py
+│       ├── config.py
+│       ├── critic.py
+│       ├── dashboard.py
+│       ├── db.py
+│       ├── detect_ats.py
+│       ├── diff.py
+│       ├── drafts_db.py
+│       ├── llm.py
+│       ├── qdrant.py
+│       ├── report.py
+│       ├── resume_pdf.py
+│       ├── revision.py
+│       ├── scorer.py
+│       ├── selection.py
+│       └── writer.py
+├── tests
+│   ├── test_detector.py
+│   └── test_scraper.py
+├── .env.example
+├── .gitignore
+├── .pre-commit-config.yaml
+├── CHANGELOG.md
+├── LICENSE
+├── pyproject.toml
+├── README.md
+├── requirements.txt
+└── schema.sql

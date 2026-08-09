@@ -33,6 +33,18 @@ Run with: python -m biohunter.dashboard [--port 5050] [--debug]
 
 New dependency: `pip install flask`. PDF export (resume_pdf.py) needs
 Playwright separately -- see that module's docstring.
+
+2026-08-09 additions (postings-index filtering + manual entry): the index
+route now supports keyword/location/company/date/score filtering and
+pagination, and there's a manual-add flow (GET/POST /postings/manual) for
+postings Scout didn't find on its own. Filtering reuses cli.py's
+keyword_filter_match() and DEFAULT_BAY_AREA_LOCATIONS -- the exact
+substring-matching logic list-postings already used -- rather than a
+second, dashboard-only reimplementation of the same heuristic. Score
+filtering is against postings.score (scorer.py's job-FIT score, run via
+`biohunter score-postings`), NOT drafts.final_score (Critic's resume-
+quality score, which only exists after a draft has been generated) --
+see the 2026-08-09 handoff for why those are two different things.
 """
 from __future__ import annotations
 
@@ -45,6 +57,7 @@ import uuid
 from flask import Flask, Response, abort, redirect, request, url_for
 
 from . import drafts_db
+from .cli import DEFAULT_BAY_AREA_LOCATIONS, keyword_filter_match
 from .critic import ScoreResult, parse_score
 from .db import get_connection, init_schema
 from .diff import diff_revision_result
@@ -57,6 +70,13 @@ from .revision import run_revision_loop
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Index-page pagination -- the 693-posting screenshot that prompted this
+# whole filtering pass rendered every card unpaginated; that only ever
+# "worked" because nobody had scrolled to the bottom yet. Kept as a plain
+# module constant, same spirit as cli.py's DEFAULT_REPORT_DIR, until
+# there's a real reason to make it configurable.
+POSTINGS_PER_PAGE = 60
 
 _esc = html.escape
 
@@ -205,6 +225,27 @@ input[type=number] { width: 64px; font-family: var(--mono); padding: 4px 6px; bo
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .empty-state { color: var(--ink-faint); text-align: center; padding: 60px 20px; }
+
+.filter-bar { background: var(--panel); border: 1px solid var(--hairline); border-radius: 4px;
+  padding: 16px 18px; margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 14px 20px; align-items: flex-end; }
+.filter-bar .field { display: flex; flex-direction: column; gap: 4px; }
+.filter-bar input[type=text], .filter-bar input[type=date], .filter-bar select, .filter-bar input[type=number] {
+  font-family: var(--sans); font-size: 13.5px; padding: 6px 8px; border: 1px solid var(--hairline);
+  border-radius: 3px; width: auto; }
+.filter-bar .checkbox-field { display: flex; align-items: center; gap: 6px; }
+.filter-bar .checkbox-field label { margin: 0; }
+.filter-bar .actions { display: flex; gap: 8px; margin-left: auto; }
+.btn--small, .btn--small:link, .btn--small:visited { padding: 6px 14px; font-size: 13px; }
+
+.pagination { display: flex; justify-content: center; gap: 6px; margin-top: 28px; }
+.pagination a, .pagination span { font-family: var(--mono); font-size: 13px; padding: 6px 12px;
+  border: 1px solid var(--hairline); border-radius: 3px; text-decoration: none; color: var(--ink); }
+.pagination .current { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+textarea.manual-jd { width: 100%; min-height: 180px; font-family: var(--mono); font-size: 13px;
+  border: 1px solid var(--hairline); border-radius: 4px; padding: 12px; resize: vertical; }
+input[type=text].wide { width: 100%; font-family: var(--sans); font-size: 14px; padding: 8px 10px;
+  border: 1px solid var(--hairline); border-radius: 4px; }
 """
 
 
@@ -225,9 +266,100 @@ def _page(title: str, body: str) -> str:
 
 
 def _score_badge(score: int | None) -> str:
+    """Critic's resume-QUALITY score (drafts.final_score) -- only exists
+    once a draft has been generated for a posting."""
     bucket = _score_bucket(score)
     label = f"{score}/10" if score is not None else "not generated"
     return f'<span class="badge badge--{bucket}">{_esc(label)}</span>'
+
+
+def _fit_score_badge(score: float | None) -> str:
+    """Scorer's job-FIT score (postings.score) -- exists once
+    `biohunter score-postings` has scored this posting, independent of
+    whether a draft has ever been generated for it. Kept visually
+    distinct (labelled "fit") from _score_badge's resume-quality badge so
+    the two scores this project deliberately keeps separate never look
+    like the same number in the UI."""
+    if score is None:
+        return '<span class="badge badge--unknown">fit: n/a</span>'
+    bucket = _score_bucket(int(round(score)))
+    return f'<span class="badge badge--{bucket}">fit: {score:g}/10</span>'
+
+
+# ---------------------------------------------------------------------------
+# Postings-index filtering. Reuses cli.py's keyword_filter_match() and
+# DEFAULT_BAY_AREA_LOCATIONS rather than a second implementation of the
+# same substring-matching heuristic (see module docstring). Company/date/
+# score are exact/range comparisons, so those stay as SQL WHERE clauses;
+# title-keyword and location matching stay in Python post-query, same
+# division cmd_list_postings itself already uses -- consistent behavior
+# beats a cleverer-but-different SQL LIKE reimplementation.
+# ---------------------------------------------------------------------------
+
+
+def _parse_filters(args) -> dict:
+    keyword = (args.get("keyword") or "").strip()
+    location_kw = (args.get("location") or "").strip()
+    return {
+        "keyword": keyword,
+        "keyword_list": [k.strip().lower() for k in keyword.split(",") if k.strip()],
+        "location": location_kw,
+        "location_list": [k.strip().lower() for k in location_kw.split(",") if k.strip()],
+        "bay_area": args.get("bay_area") == "1",
+        "company": (args.get("company") or "").strip(),
+        "date_from": (args.get("date_from") or "").strip(),
+        "date_to": (args.get("date_to") or "").strip(),
+        "min_score": (args.get("min_score") or "").strip(),
+        "page": max(1, int(args.get("page") or 1)) if str(args.get("page") or "1").isdigit() else 1,
+    }
+
+
+def _filters_query_string(filters: dict, **overrides) -> str:
+    """Rebuilds the query string for pagination links, carrying every
+    active filter forward except the ones being overridden (e.g. page)."""
+    merged = {
+        "keyword": filters["keyword"], "location": filters["location"],
+        "bay_area": "1" if filters["bay_area"] else "", "company": filters["company"],
+        "date_from": filters["date_from"], "date_to": filters["date_to"],
+        "min_score": filters["min_score"], "page": filters["page"],
+    }
+    merged.update(overrides)
+    from urllib.parse import urlencode
+    return urlencode({k: v for k, v in merged.items() if v not in (None, "", 0)})
+
+
+def _distinct_companies(conn) -> list[str]:
+    rows = conn.execute("SELECT DISTINCT name FROM companies ORDER BY name").fetchall()
+    return [r[0] for r in rows]
+
+
+def _filter_bar_html(filters: dict, companies: list[str]) -> str:
+    company_options = ['<option value="">All companies</option>']
+    for name in companies:
+        selected = " selected" if name == filters["company"] else ""
+        company_options.append(f'<option value="{_esc(name)}"{selected}>{_esc(name)}</option>')
+
+    return f"""<form class="filter-bar" method="get" action="{url_for('index')}">
+  <div class="field"><label for="f-keyword">Keyword (title)</label>
+    <input type="text" id="f-keyword" name="keyword" value="{_esc(filters['keyword'])}" placeholder="e.g. mass spec, scientist"></div>
+  <div class="field"><label for="f-location">Location keyword</label>
+    <input type="text" id="f-location" name="location" value="{_esc(filters['location'])}" placeholder="e.g. remote, san diego"></div>
+  <div class="field checkbox-field">
+    <input type="checkbox" id="f-bay-area" name="bay_area" value="1" {"checked" if filters['bay_area'] else ""}>
+    <label for="f-bay-area">Bay Area only</label></div>
+  <div class="field"><label for="f-company">Company</label>
+    <select id="f-company" name="company">{''.join(company_options)}</select></div>
+  <div class="field"><label for="f-date-from">First seen from</label>
+    <input type="date" id="f-date-from" name="date_from" value="{_esc(filters['date_from'])}"></div>
+  <div class="field"><label for="f-date-to">First seen to</label>
+    <input type="date" id="f-date-to" name="date_to" value="{_esc(filters['date_to'])}"></div>
+  <div class="field"><label for="f-min-score">Min fit score</label>
+    <input type="number" id="f-min-score" name="min_score" min="1" max="10" value="{_esc(filters['min_score'])}" style="width:56px;"></div>
+  <div class="actions">
+    <button class="btn btn--small" type="submit">Apply</button>
+    <a class="btn btn--secondary btn--small" href="{url_for('index')}">Clear</a>
+  </div>
+</form>"""
 
 
 # ---------------------------------------------------------------------------
@@ -239,22 +371,65 @@ def _score_badge(score: int | None) -> str:
 def index():
     conn = get_connection()
     init_schema(conn)
-    rows = conn.execute(
-        """SELECT postings.id, companies.name, postings.title, postings.location, postings.status
-           FROM postings JOIN companies ON postings.company_id = companies.id
-           WHERE postings.status != 'stale'
-           ORDER BY companies.name, postings.title"""
-    ).fetchall()
-    drafts_by_posting = drafts_db.latest_draft_index(conn)
 
-    if not rows:
-        body = f'<div class="dash-wrap"><div class="empty-state">No postings yet — run <code>biohunter run-scout</code> first.</div></div>'
+    filters = _parse_filters(request.args)
+
+    query = """
+        SELECT postings.id, companies.name, postings.title, postings.location,
+               postings.status, postings.score, postings.first_seen_at
+        FROM postings JOIN companies ON postings.company_id = companies.id
+        WHERE postings.status != 'stale'
+    """
+    params: list = []
+    if filters["company"]:
+        query += " AND companies.name = ?"
+        params.append(filters["company"])
+    if filters["date_from"]:
+        query += " AND date(postings.first_seen_at) >= date(?)"
+        params.append(filters["date_from"])
+    if filters["date_to"]:
+        query += " AND date(postings.first_seen_at) <= date(?)"
+        params.append(filters["date_to"])
+    if filters["min_score"]:
+        query += " AND postings.score >= ?"
+        params.append(float(filters["min_score"]))
+    query += " ORDER BY companies.name, postings.title"
+
+    all_rows = conn.execute(query, tuple(params)).fetchall()
+
+    # Keyword/location matching stays in Python, reusing cli.py's exact
+    # predicate -- see module docstring for why.
+    location_include = DEFAULT_BAY_AREA_LOCATIONS if filters["bay_area"] else filters["location_list"]
+    filtered_rows = [
+        row for row in all_rows
+        if keyword_filter_match(row[2], filters["keyword_list"], [])
+        and keyword_filter_match(row[3] or "", location_include, [])
+    ]
+
+    drafts_by_posting = drafts_db.latest_draft_index(conn)
+    companies = _distinct_companies(conn)
+    filter_bar = _filter_bar_html(filters, companies)
+
+    total = len(filtered_rows)
+    per_page = POSTINGS_PER_PAGE
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page = min(filters["page"], total_pages)
+    page_rows = filtered_rows[(page - 1) * per_page : page * per_page]
+
+    add_manual_link = f'<a class="btn btn--secondary btn--small" href="{url_for("posting_manual_form")}">+ Add posting manually</a>'
+
+    if not all_rows:
+        body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Postings</h1></div>
+  {filter_bar}
+  <div class="empty-state">No postings yet — run <code>biohunter run-scout</code> first, or {add_manual_link}.</div>
+</div>"""
         return _page("Postings", body)
 
     cards = []
-    for posting_id, company, title, location, status in rows:
+    for posting_id, company, title, location, status, score, _first_seen_at in page_rows:
         draft = drafts_by_posting.get(posting_id)
-        score = draft.final_score if draft else None
+        quality_score = draft.final_score if draft else None
         link = (
             f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">View result</a>'
             if draft
@@ -265,13 +440,27 @@ def index():
   <div class="card__company">{_esc(company)}</div>
   <h3 class="card__title">{_esc(title)}</h3>
   <div class="card__meta">{_esc(location or 'Location n/a')} &middot; status: {_esc(status)}</div>
-  <div class="card__footer">{_score_badge(score)}{link}</div>
+  <div class="card__footer">{_fit_score_badge(score)}{_score_badge(quality_score)}{link}</div>
 </div>"""
         )
 
+    pagination_html = ""
+    if total_pages > 1:
+        links = []
+        for p in range(1, total_pages + 1):
+            if p == page:
+                links.append(f'<span class="current">{p}</span>')
+            else:
+                qs = _filters_query_string(filters, page=p)
+                links.append(f'<a href="{url_for("index")}?{qs}">{p}</a>')
+        pagination_html = f'<div class="pagination">{"".join(links)}</div>'
+
     body = f"""<div class="dash-wrap">
-  <div class="detail-header"><h1>Postings</h1><p class="sub">{len(rows)} posting(s)</p></div>
+  <div class="detail-header"><h1>Postings</h1>
+    <p class="sub">{total} posting(s) match &middot; {len(all_rows)} total (excluding stale) &middot; {add_manual_link}</p></div>
+  {filter_bar}
   <div class="grid">{''.join(cards)}</div>
+  {pagination_html}
 </div>"""
     return _page("Postings", body)
 
@@ -459,6 +648,104 @@ def posting_cover_letter_pdf(posting_id):
         mimetype="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="cover_letter_posting_{posting_id}.pdf"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Manual posting entry -- for a posting Scout didn't find on its own
+# (the 2026-08-09 handoff's concrete example: repeatedly hand-testing the
+# same Guardant Health posting via --job-description-file on the CLI
+# instead of having it live in the dashboard like everything else).
+#
+# _find_or_create_company_light() is deliberately NOT
+# detector.py's _get_or_create_company_id(): that function takes a full
+# CompanyConfig (ats_type/ats_slug/css_selector, sourced from
+# companies.yaml) which a manually-typed company name doesn't have. This
+# is the lighter-weight version the handoff called for -- name only,
+# everything else NULL, same as any company that would otherwise need a
+# companies.yaml entry to exist at all.
+#
+# careers_url is NOT NULL in schema.sql with no default, so a manually-
+# created company needs SOME value there. Using the posting's own URL as
+# a stand-in (rather than fabricating a guessed careers-page URL, which
+# would look like real data but not be) is the honest choice -- flagged
+# here rather than silently picked.
+# ---------------------------------------------------------------------------
+
+
+def _find_or_create_company_light(conn, name: str, fallback_url: str) -> int:
+    row = conn.execute("SELECT id FROM companies WHERE name = ?", (name,)).fetchone()
+    if row:
+        return row[0]
+    conn.execute(
+        "INSERT INTO companies (name, careers_url) VALUES (?, ?)",
+        (name, fallback_url),
+    )
+    conn.commit()
+    row = conn.execute("SELECT id FROM companies WHERE name = ?", (name,)).fetchone()
+    return row[0]
+
+
+@app.route("/postings/manual")
+def posting_manual_form():
+    body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Add a posting manually</h1>
+    <p class="sub">For anything Scout didn't find on its own. Once added, it behaves exactly
+    like any Scout-found posting -- same Generate button, same report, same PDFs.</p></div>
+  <form method="post" action="{url_for('posting_manual_create')}">
+    <div class="form-row"><label style="width:100%;">Company name
+      <input class="wide" type="text" name="company" required></label></div>
+    <div class="form-row"><label style="width:100%;">Job title
+      <input class="wide" type="text" name="title" required></label></div>
+    <div class="form-row"><label style="width:100%;">Posting URL
+      <input class="wide" type="text" name="url" required placeholder="https://..."></label></div>
+    <div class="form-row"><label style="width:100%;">Location (optional)
+      <input class="wide" type="text" name="location" placeholder="e.g. South San Francisco, CA"></label></div>
+    <div class="form-row" style="display:block;"><label>Job description</label>
+      <textarea class="manual-jd" name="description" required></textarea></div>
+    <div class="btn-row">
+      <button class="btn" type="submit">Add posting</button>
+      <a class="btn btn--secondary" href="{url_for('index')}">Cancel</a>
+    </div>
+  </form>
+</div>"""
+    return _page("Add posting manually", body)
+
+
+@app.route("/postings/manual", methods=["POST"])
+def posting_manual_create():
+    conn = get_connection()
+    init_schema(conn)
+
+    company_name = (request.form.get("company") or "").strip()
+    title = (request.form.get("title") or "").strip()
+    url = (request.form.get("url") or "").strip()
+    location = (request.form.get("location") or "").strip() or None
+    description = (request.form.get("description") or "").strip()
+
+    if not (company_name and title and url and description):
+        body = '<div class="dash-wrap"><p>Company, title, URL, and job description are all required.</p></div>'
+        return _page("Error", body), 400
+
+    company_id = _find_or_create_company_light(conn, company_name, fallback_url=url)
+
+    existing = conn.execute(
+        "SELECT id FROM postings WHERE company_id = ? AND url = ?", (company_id, url)
+    ).fetchone()
+    if existing:
+        # Same URL already stored for this company -- treat resubmission as
+        # "take me to the one I already have" rather than erroring on the
+        # UNIQUE(company_id, url) constraint, matching _upsert_postings()'s
+        # own re-sighting semantics in scout/detector.py.
+        return redirect(url_for("posting_detail", posting_id=existing[0]))
+
+    cur = conn.execute(
+        """INSERT INTO postings (company_id, title, url, location, description, status)
+           VALUES (?, ?, ?, ?, ?, 'new')""",
+        (company_id, title, url, location, description),
+    )
+    conn.commit()
+    posting_id = cur.lastrowid
+    return redirect(url_for("posting_detail", posting_id=posting_id))
 
 
 def main() -> None:

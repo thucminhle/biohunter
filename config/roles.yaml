@@ -52,6 +52,17 @@ critic_review:
   model: gemma4:12b-mlx
   base_url: http://localhost:11434
 
+# Scorer's job-fit triage pass (pre-Writer -- see scorer.py's own docstring
+# for what this does and doesn't judge). Routed to the same model as
+# writer_selection/critic_review for now -- purely a "get it working"
+# choice, not a claim that this is the best-suited model for judgment
+# calls. Revisit once you've seen how it actually scores against real
+# postings.
+scorer_fit:
+  provider: ollama
+  model: gemma4:12b-mlx
+  base_url: http://localhost:11434
+
 networker_contact_research:
   provider: ollama
   model: qwen2.5:14b

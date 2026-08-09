@@ -2,6 +2,7 @@
 Usage:
     python -m biohunter.cli run-scout
     python -m biohunter.cli list-postings [--exclude KEYWORD,...] [--include KEYWORD,...] [--company NAME]
+    python -m biohunter.cli score-postings [--rescore] [--limit N] [--model ROLE=VALUE ...] [--think]
     python -m biohunter.cli verify-llm [--role ROLE ...] [--model ROLE=VALUE ...] [--include-anthropic]
     python -m biohunter.cli verify-writer --company NAME [--title TITLE]
         (--job-description TEXT | --job-description-file PATH) [--model ROLE=VALUE ...]
@@ -27,6 +28,7 @@ from .diff import diff_revision_result
 from .llm import LLMClient
 from .report import render_posting_report, report_id
 from .revision import run_revision_loop
+from .scorer import score_posting
 from .scout import run_scout
 from .writer import generate_draft
 
@@ -47,12 +49,48 @@ DEFAULT_EXCLUDE_KEYWORDS = ["postdoc", "post-doctoral", "post doctoral", "intern
 # time. Includes common per-posting location text on top of city names, since
 # ATS location fields vary (some say "South San Francisco, CA", some just
 # "Bay Area", some "Remote - US").
+#
+# NOTE (2026-08-09 filtering session): until now this constant was defined
+# but never actually referenced anywhere -- cmd_list_postings below has
+# always sourced its location defaults from search_criteria.yaml via
+# load_search_criteria(), not from this list. It's wired in for real now
+# as dashboard.py's dedicated "Bay Area" quick-filter checkbox (see that
+# module's import of this constant), which is a distinct thing from the
+# free-text --location / search_criteria.yaml location_include filter:
+# this list is specifically Bay Area, that one is whatever the user's
+# current search criteria says. cmd_list_postings itself is UNCHANGED by
+# this -- it still only uses search_criteria.yaml/--location, on purpose,
+# so wiring this in for the dashboard doesn't silently change any existing
+# CLI behavior.
 DEFAULT_BAY_AREA_LOCATIONS = [
     "bay area", "san francisco", "south san francisco", "oakland", "berkeley",
     "san jose", "redwood city", "foster city", "fremont", "palo alto",
     "menlo park", "emeryville", "mountain view", "santa clara", "hayward",
     "san mateo", "sunnyvale", "vacaville", "richmond, ca", "alameda",
 ]
+
+
+def keyword_filter_match(text: str, include: list[str], exclude: list[str]) -> bool:
+    """The exact substring-matching predicate cmd_list_postings has always
+    used for both its title and location filters, extracted so dashboard.py
+    can reuse it instead of re-implementing a second, possibly-inconsistent
+    version of the same location-string heuristic (per the 2026-08-09
+    handoff's explicit call to check here before building dashboard
+    filtering fresh).
+
+    Case-insensitive substring match. `exclude` wins outright (any match
+    rejects). An empty `include` list means "no restriction" -- only a
+    non-empty `include` list requires at least one match. This is the same
+    three-branch logic cmd_list_postings applied inline to title_lower/
+    location_lower before this refactor; behavior is unchanged, only moved
+    into a shared, importable function.
+    """
+    text_lower = (text or "").lower()
+    if any(kw in text_lower for kw in exclude):
+        return False
+    if include and not any(kw in text_lower for kw in include):
+        return False
+    return True
 
 
 def _log_run(conn, status: str, detail: str) -> None:
@@ -141,16 +179,9 @@ def cmd_list_postings(args: argparse.Namespace) -> None:
 
     shown = 0
     for company, title, location, url in rows:
-        title_lower = title.lower()
-        location_lower = (location or "").lower()
-
-        if any(kw in title_lower for kw in title_exclude):
+        if not keyword_filter_match(title, title_include, title_exclude):
             continue
-        if title_include and not any(kw in title_lower for kw in title_include):
-            continue
-        if any(kw in location_lower for kw in location_exclude):
-            continue
-        if location_include and not any(kw in location_lower for kw in location_include):
+        if not keyword_filter_match(location or "", location_include, location_exclude):
             continue
 
         print(f"[{company}] {title} -- {location or 'location n/a'}\n    {url}")
@@ -161,6 +192,67 @@ def cmd_list_postings(args: argparse.Namespace) -> None:
         f"(title_exclude: {', '.join(title_exclude) or 'none'}; "
         f"location_include: {', '.join(location_include) or 'any'})"
     )
+
+
+def cmd_score_postings(args: argparse.Namespace) -> None:
+    """Runs Scorer (scorer.score_posting) over stored postings and writes
+    postings.score / postings.score_rationale. Per the pipeline
+    (Scout -> Scorer -> Writer -> Critic -> Human Review), this is the
+    triage step that decides which of a large Scout haul is worth
+    Writer's multi-minute generation cost -- it never touches Writer,
+    Critic, or drafts_db.py.
+
+    Default scope is status = 'new' only, and a successful score moves a
+    posting to status = 'scored' -- so a plain re-run of this command
+    only ever scores postings that haven't been scored yet, same
+    "don't redo settled work by default" spirit as Scout's staleness
+    logic. --rescore widens that to already-'scored' postings too, for
+    when search_criteria.yaml or the resume catalog in Qdrant has changed
+    since the last scoring pass and old scores may no longer reflect it.
+
+    A posting with no stored description (nothing for Scout to have
+    found, or a manually-added posting where the JD hasn't been pasted in
+    yet -- see the dashboard's manual-add flow) is skipped with a printed
+    note rather than scored against an empty description, which would
+    just produce a meaningless low score.
+    """
+    criteria = load_search_criteria()
+    conn = get_connection()
+    init_schema(conn)
+
+    overrides = _parse_model_overrides(args.model or [])
+    client = LLMClient(overrides=overrides)
+
+    statuses = "('new', 'scored')" if args.rescore else "('new')"
+    query = f"""
+        SELECT postings.id, companies.name, postings.title, postings.location, postings.description
+        FROM postings JOIN companies ON postings.company_id = companies.id
+        WHERE postings.status IN {statuses}
+        ORDER BY companies.name, postings.title
+    """
+    rows = conn.execute(query).fetchall()
+    if args.limit:
+        rows = rows[: args.limit]
+
+    scored = 0
+    skipped = 0
+    for posting_id, company, title, location, description in rows:
+        if not description:
+            print(f"[skip] {company} -- {title}: no job description stored, nothing to score against")
+            skipped += 1
+            continue
+        result = score_posting(client, company, title, location, description, criteria, think=args.think)
+        conn.execute(
+            "UPDATE postings SET score = ?, score_rationale = ?, "
+            "status = CASE WHEN status = 'new' THEN 'scored' ELSE status END WHERE id = ?",
+            (result.score, result.rationale, posting_id),
+        )
+        conn.commit()
+        score_display = f"{result.score}/10" if result.score is not None else "unparseable"
+        print(f"[{company}] {title}: {score_display} -- {result.rationale or '(no rationale parsed)'}")
+        scored += 1
+
+    print(f"\n{scored} posting(s) scored, {skipped} skipped (no description), {len(rows)} considered.")
 
 
 def cmd_verify_llm(args: argparse.Namespace) -> None:
@@ -444,6 +536,26 @@ def main() -> None:
     p_list.add_argument("--company", help="Filter to a single company name")
     p_list.add_argument("--include-stale", action="store_true", help="Include postings not seen in 30+ days (presumed closed)")
     p_list.set_defaults(func=cmd_list_postings)
+
+    p_score = subparsers.add_parser(
+        "score-postings",
+        help="Run Scorer (job-fit triage, before any draft is generated) over stored postings",
+    )
+    p_score.add_argument(
+        "--rescore", action="store_true",
+        help="Also re-score postings already at status='scored' (default: only status='new')",
+    )
+    p_score.add_argument("--limit", type=int, help="Only score the first N matching postings (useful for a quick test run)")
+    p_score.add_argument(
+        "--model", action="append",
+        help="Override scorer_fit's model for this run, e.g. --model scorer_fit=llama3.1:8b. Repeatable.",
+    )
+    p_score.add_argument(
+        "--think", action="store_true",
+        help="Run Scorer's judgment call in 'Thorough (with thinking)' mode. Default: fast mode, "
+             "same default every other role in this codebase uses.",
+    )
+    p_score.set_defaults(func=cmd_score_postings)
 
     p_verify = subparsers.add_parser("verify-llm", help="Smoke-test every LLMClient role with a trivial round-trip call")
     p_verify.add_argument("--role", action="append", help="Test only this role (repeatable). Default: all roles.")
