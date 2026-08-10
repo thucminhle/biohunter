@@ -71,10 +71,17 @@ class JobsynAdapter(ATSAdapter):
 ## `src/biohunter/ats/jobvite.py`
 ```python
 _USER_AGENT = 'BioHunter/0.1 (personal job-search tool; contact: set-your-email-here)'
+_DETAIL_FETCH_DELAY_SECONDS = 0.3
+_DESCRIPTION_SELECTORS = ['#jv-job-detail-description', '.jv-job-detail-description', 'div.jv-page-body', 'article']
+logger = logging.getLogger(__name__)
 class JobviteAdapter(ATSAdapter):
     """Unlike Greenhouse/Lever/Ashby, Jobvite doesn't expose a public,"""
     name = 'jobvite'
     def fetch_postings(self, ats_slug: str) -> list[RawPosting]:
+        ...
+
+    def _fetch_description(self, job_url: str) -> str | None:
+        """One extra GET per job, fetching that job's own detail page and"""
         ...
 
 
@@ -95,6 +102,8 @@ class LeverAdapter(ATSAdapter):
 ```python
 _USER_AGENT = 'BioHunter/0.1 (personal job-search tool; contact: set-your-email-here)'
 _PAGE_SIZE = 20
+_DETAIL_FETCH_DELAY_SECONDS = 0.3
+logger = logging.getLogger(__name__)
 class WorkdayAdapter(ATSAdapter):
     """Workday doesn't publish a documented public API the way Greenhouse/"""
     name = 'workday'
@@ -102,6 +111,10 @@ class WorkdayAdapter(ATSAdapter):
         ...
 
     def _fetch_one_site(self, host: str, tenant: str, site: str) -> list[RawPosting]:
+        ...
+
+    def _fetch_description(self, host: str, tenant: str, site: str, external_path: str) -> str | None:
+        """One extra GET per job -- see class docstring's DESCRIPTION"""
         ...
 
 

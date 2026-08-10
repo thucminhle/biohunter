@@ -30,9 +30,8 @@ CREATE TABLE IF NOT EXISTS postings (
     score            REAL,   -- job-FIT score (candidate/location/seniority), written by
                               -- scorer.py's `biohunter score-postings` -- NOT Critic's
                               -- resume-quality score, which lives on drafts.final_score
-                              -- instead (see that table's comment). Column existed
-                              -- since Phase 1; as of 2026-08-09 something finally
-                              -- populates it.
+                              -- instead (see that table's comment). Column existed since
+                              -- Phase 1 -- as of 2026-08-09 something finally populates it.
     score_rationale  TEXT,
     UNIQUE(company_id, url)
 );

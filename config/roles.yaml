@@ -60,7 +60,7 @@ critic_review:
 # postings.
 scorer_fit:
   provider: ollama
-  model: gemma4:12b-mlx
+  model: gemma3:1b-it-qat
   base_url: http://localhost:11434
 
 networker_contact_research:

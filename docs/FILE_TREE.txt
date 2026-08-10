@@ -29,7 +29,8 @@
 │   │   ├── 2026-08-06_BioHunter-Phase-2-Development.md
 │   │   ├── 2026-08-07_BioHunter-Critic-Revision-Loop-Handoff.md
 │   │   ├── 2026-08-07_BioHunter-Diff-Score-BulletFix-Handoff.md
-│   │   └── 2026-08-09_BioHunter-Dashboard-Filtering-ManualAdd-Handoff.md
+│   │   ├── 2026-08-09_BioHunter-Dashboard-Filtering-ManualAdd-Handoff.md
+│   │   └── 2026-08-10_BioHunter-Scorer-DescriptionFetch-PreFilter-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md
