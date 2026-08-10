@@ -53,14 +53,25 @@ critic_review:
   base_url: http://localhost:11434
 
 # Scorer's job-fit triage pass (pre-Writer -- see scorer.py's own docstring
-# for what this does and doesn't judge). Routed to the same model as
-# writer_selection/critic_review for now -- purely a "get it working"
-# choice, not a claim that this is the best-suited model for judgment
-# calls. Revisit once you've seen how it actually scores against real
-# postings.
+# for what this does and doesn't judge). Was gemma3:1b-it-qat (a "get it
+# working" fast-model pick, never load-tested for format compliance) until
+# 2026-08-10, when a real --debug run showed exactly why that mattered: the
+# model's entire response was the literal 9 characters "SCORE: 6\n" -- no
+# paragraph, no rationale, not even the dash separator critic.py's
+# parse_score() requires. Not a truncation or parsing bug -- the model
+# simply didn't attempt the instructed two-part format at all. Switched to
+# gemma4:12b-mlx: this project's own quality-tier model (writer_selection/
+# writer_coverletter/critic_review), already proven in this exact codebase
+# to follow structured-output instructions reliably (see the 2026-08-07
+# writer_selection debugging handoff). Slower per call -- multi-second on
+# local hardware -- accepted deliberately over qwen2.5:14b's untested-on-
+# this-format speed, since scorer_fit's whole job is producing a judgment
+# call in a specific parseable shape; a fast wrong-shaped answer is worse
+# than a slow right-shaped one here. Revisit if this proves too slow at
+# real triage volume (hundreds of postings per run).
 scorer_fit:
   provider: ollama
-  model: gemma3:1b-it-qat
+  model: gemma4:12b-mlx
   base_url: http://localhost:11434
 
 networker_contact_research:

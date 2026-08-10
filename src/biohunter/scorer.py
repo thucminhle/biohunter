@@ -55,23 +55,21 @@ no data to score them against yet. If those matter, they need a real new
 config field (most likely a search_criteria.yaml addition) before Scorer
 can use them; not guessed here.
 
-CONFIG DEPENDENCY, confirmed against real roles.yaml: no `scorer_fit`
-entry exists yet. LLMClient resolves role names purely from
-config/roles.yaml, so this will fail with a lookup error until one is
-added. Every existing role in your roles.yaml routes through Ollama
-(gemma4:12b-mlx or qwen2.5:14b) except the still-unused mlx_smoke_test --
-there is no cloud-routed role active in this file to mirror for a
-"quality-sensitive" default the way the earlier draft assumed. Suggested
-addition, consistent with your file's own local-first pattern (add to
-config/roles.yaml, not done here since it's your file to own):
-
-    scorer_fit:
-      provider: ollama
-      model: qwen2.5:14b       # matches scout_summarizer's model -- a
-                                # cheap/fast local model is appropriate
-                                # here, this runs once per posting at
-                                # triage scale (hundreds of calls)
-      base_url: http://localhost:11434
+MODEL, resolved 2026-08-10 after real testing (not guessed): scorer_fit
+originally pointed at gemma3:1b-it-qat, a "get it working" fast-model pick
+that was never load-tested for format compliance. A real --debug run
+showed exactly why that mattered -- the model's entire response was the
+literal 9 characters "SCORE: 6\n", no paragraph, no rationale, not even
+the dash separator parse_score() requires. Not a truncation or parsing
+bug -- the model simply didn't attempt the instructed two-part format.
+Switched to gemma4:12b-mlx (this project's proven quality-tier model,
+already reliable elsewhere in this codebase for structured-output
+instructions) after re-testing confirmed clean, well-differentiated
+scores. Slower per call than a 1B model, accepted deliberately: a fast
+wrong-shaped answer is worse than a slow right-shaped one for a triage
+step whose entire output is a parsed number. See config/roles.yaml's own
+scorer_fit comment for the full account -- kept in sync with this one,
+not duplicated blind.
 
 INVOCATION, scoped deliberately: like run_scout(), this is driven from the
 CLI (`biohunter score-postings`), not from the dashboard. The dashboard
@@ -81,6 +79,8 @@ that Scout also only ever runs from the CLI, never from a dashboard
 button.
 """
 from __future__ import annotations
+
+import logging
 
 from . import qdrant
 from .config import SearchCriteria
@@ -93,6 +93,8 @@ from .selection import (
 )
 
 SCORER_ROLE = "scorer_fit"
+
+logger = logging.getLogger(__name__)
 
 SCORER_INSTRUCTION = (
     "You are a candid, detail-oriented career advisor helping a candidate triage a "
@@ -191,4 +193,8 @@ Description:
 {job_description}
 """
     response = llm.complete(SCORER_ROLE, [{"role": "user", "content": prompt}], think=think)
+    logger.debug(
+        "scorer_fit raw response for %s -- %s (%d chars): %r",
+        company_name, job_title, len(response.text), response.text,
+    )
     return parse_score(response.text)

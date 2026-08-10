@@ -2,7 +2,10 @@
 Usage:
     python -m biohunter.cli run-scout
     python -m biohunter.cli list-postings [--exclude KEYWORD,...] [--include KEYWORD,...] [--company NAME]
-    python -m biohunter.cli score-postings [--rescore] [--limit N] [--model ROLE=VALUE ...] [--think]
+    python -m biohunter.cli score-postings [--rescore] [--limit N]
+        [--location-include KEYWORD,...] [--location-exclude KEYWORD,...]
+        [--title-include KEYWORD,...] [--title-exclude KEYWORD,...] [--bay-area]
+        [--model ROLE=VALUE ...] [--think]
     python -m biohunter.cli verify-llm [--role ROLE ...] [--model ROLE=VALUE ...] [--include-anthropic]
     python -m biohunter.cli verify-writer --company NAME [--title TITLE]
         (--job-description TEXT | --job-description-file PATH) [--model ROLE=VALUE ...]
@@ -215,10 +218,46 @@ def cmd_score_postings(args: argparse.Namespace) -> None:
     yet -- see the dashboard's manual-add flow) is skipped with a printed
     note rather than scored against an empty description, which would
     just produce a meaningless low score.
+
+    PRE-FILTERING (2026-08-10): before any LLM call happens, rows are run
+    through cli.py's own keyword_filter_match() -- the SAME predicate
+    cmd_list_postings and dashboard.py's index() route already use, not a
+    third reimplementation. This is the actual fix for the "936 postings,
+    only 279 are plausible Bay Area fits" waste: an excluded posting now
+    costs zero LLM calls instead of one. Defaults to search_criteria.yaml's
+    title_exclude/title_include/location_include/location_exclude -- the
+    same default-source-of-filters behavior cmd_list_postings already has
+    -- so a plain `score-postings` with no flags applies the real filter
+    automatically rather than silently scoring everything. --location-include/
+    --location-exclude/--title-include/--title-exclude override those
+    per-run, same comma-separated-string convention as list-postings'
+    --exclude/--include/--location. --bay-area swaps in
+    DEFAULT_BAY_AREA_LOCATIONS for location_include, mirroring exactly how
+    dashboard.py's "Bay Area only" checkbox already does it (an outright
+    override, not combined with --location-include).
     """
     criteria = load_search_criteria()
     conn = get_connection()
     init_schema(conn)
+
+    title_exclude = (
+        [k.strip().lower() for k in args.title_exclude.split(",") if k.strip()]
+        if args.title_exclude is not None else criteria.title_exclude
+    )
+    title_include = (
+        [k.strip().lower() for k in args.title_include.split(",") if k.strip()]
+        if args.title_include is not None else criteria.title_include
+    )
+    if args.bay_area:
+        location_include = DEFAULT_BAY_AREA_LOCATIONS
+    elif args.location_include is not None:
+        location_include = [k.strip().lower() for k in args.location_include.split(",") if k.strip()]
+    else:
+        location_include = criteria.location_include
+    location_exclude = (
+        [k.strip().lower() for k in args.location_exclude.split(",") if k.strip()]
+        if args.location_exclude is not None else criteria.location_exclude
+    )
 
     overrides = _parse_model_overrides(args.model or [])
     client = LLMClient(overrides=overrides)
@@ -230,9 +269,27 @@ def cmd_score_postings(args: argparse.Namespace) -> None:
         WHERE postings.status IN {statuses}
         ORDER BY companies.name, postings.title
     """
-    rows = conn.execute(query).fetchall()
+    all_rows = conn.execute(query).fetchall()
+
+    # Filter BEFORE the scoring loop -- an excluded posting must cost zero
+    # LLM calls, not one. Same title/location split cmd_list_postings uses.
+    rows = [
+        row for row in all_rows
+        if keyword_filter_match(row[2], title_include, title_exclude)
+        and keyword_filter_match(row[3] or "", location_include, location_exclude)
+    ]
+    filtered_out = len(all_rows) - len(rows)
+    matched = len(rows)
     if args.limit:
         rows = rows[: args.limit]
+
+    limit_note = f"; --limit trims this run to {len(rows)}" if args.limit and len(rows) < matched else ""
+    print(
+        f"{matched} posting(s) match title/location filter{limit_note} "
+        f"({filtered_out} excluded out of {len(all_rows)} candidates; "
+        f"title_exclude: {', '.join(title_exclude) or 'none'}; "
+        f"location_include: {', '.join(location_include) or 'any'})\n"
+    )
 
     scored = 0
     skipped = 0
@@ -546,6 +603,27 @@ def main() -> None:
         help="Also re-score postings already at status='scored' (default: only status='new')",
     )
     p_score.add_argument("--limit", type=int, help="Only score the first N matching postings (useful for a quick test run)")
+    p_score.add_argument(
+        "--location-include",
+        help="Comma-separated location keywords to require, any match (default: search_criteria.yaml's location_include)",
+    )
+    p_score.add_argument(
+        "--location-exclude",
+        help="Comma-separated location keywords to reject (default: search_criteria.yaml's location_exclude)",
+    )
+    p_score.add_argument(
+        "--title-include",
+        help="Comma-separated title keywords to require, any match (default: search_criteria.yaml's title_include)",
+    )
+    p_score.add_argument(
+        "--title-exclude",
+        help="Comma-separated title keywords to reject (default: search_criteria.yaml's title_exclude)",
+    )
+    p_score.add_argument(
+        "--bay-area", action="store_true",
+        help="Restrict to DEFAULT_BAY_AREA_LOCATIONS (same list as the dashboard's 'Bay Area only' "
+             "checkbox), overriding --location-include if both are given.",
+    )
     p_score.add_argument(
         "--model", action="append",
         help="Override scorer_fit's model for this run, e.g. --model scorer_fit=llama3.1:8b. Repeatable.",

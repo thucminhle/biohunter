@@ -125,7 +125,10 @@ class WorkdayAdapter(ATSAdapter):
 # Usage:
 #     python -m biohunter.cli run-scout
 #     python -m biohunter.cli list-postings [--exclude KEYWORD,...] [--include KEYWORD,...] [--company NAME]
-#     python -m biohunter.cli score-postings [--rescore] [--limit N] [--model ROLE=VALUE ...] [--think]
+#     python -m biohunter.cli score-postings [--rescore] [--limit N]
+#         [--location-include KEYWORD,...] [--location-exclude KEYWORD,...]
+#         [--title-include KEYWORD,...] [--title-exclude KEYWORD,...] [--bay-area]
+#         [--model ROLE=VALUE ...] [--think]
 #     python -m biohunter.cli verify-llm [--role ROLE ...] [--model ROLE=VALUE ...] [--include-anthropic]
 #     python -m biohunter.cli verify-writer --company NAME [--title TITLE]
 #         (--job-description TEXT | --job-description-file PATH) [--model ROLE=VALUE ...]
@@ -297,6 +300,28 @@ def parse_score(critique_text: str) -> ScoreResult:
 # `biohunter score-postings`), NOT drafts.final_score (Critic's resume-
 # quality score, which only exists after a draft has been generated) --
 # see the 2026-08-09 handoff for why those are two different things.
+#
+# 2026-08-10 addition (dashboard-triggered Scout + Scorer): REVERSES a
+# decision scorer.py's own docstring stated on purpose earlier the same
+# session ("like run_scout(), this is driven from the CLI... not from the
+# dashboard") -- naming that explicitly here rather than letting it happen
+# quietly as a side effect of adding a button. Both new routes reuse the
+# SAME background-job mechanism Generate already uses (_jobs/_set_job/
+# _get_job, a daemon thread, /jobs/<job_id>.json polling) rather than a
+# second mechanism -- the job dict now carries a "kind" field
+# ("generate" | "score_batch" | "scout") so job_status_page's polling JS
+# can show the right progress shape for each, since only score_batch's
+# total is known upfront (an exact filtered-posting count) and can show
+# real "N of M" progress; scout's isn't -- run_scout()'s own module isn't
+# in this codebase's dashboard.py dependency chain and wasn't re-verified
+# before this was written, so its button intentionally shows an honest
+# "running, can't report fine-grained progress" status rather than a
+# fabricated progress bar. "Score these N filtered postings" runs Scorer
+# over EXACTLY the postings-index's current filter set (same
+# keyword_filter_match() call the cards already render from, via a shared
+# _filtered_postings() helper extracted from index() for this) -- not a
+# second, separate filter UI, per the 2026-08-10 handoff's explicit
+# instruction.
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
@@ -312,10 +337,18 @@ def _run_generation(job_id: str, posting_id: int, company_name: str, job_title: 
     """Runs in a background thread, started by POST /postings/<id>/generate."""
     ...
 
+def _run_score_batch(job_id: str, posting_rows: list[tuple], rescore: bool, think: bool) -> None:
+    """Runs in a background thread, started by POST /postings/score-batch."""
+    ...
+
+def _run_scout_job(job_id: str) -> None:
+    """Runs in a background thread, started by POST /scout/run. Calls"""
+    ...
+
 def _get_posting(conn, posting_id: int) -> dict | None:
     ...
 
-_DASHBOARD_STYLE = '\n.topbar {\n  background: var(--ink); color: #F6F7F5; padding: 18px 24px;\n}\n.topbar a { color: #F6F7F5; text-decoration: none; font-weight: 650; font-size: 15px; }\n.topbar__wrap { max-width: 1040px; margin: 0 auto; }\n.dash-wrap { max-width: 1040px; margin: 0 auto; padding: 28px 24px 96px; }\n\n.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }\n.card {\n  background: var(--panel); border: 1px solid var(--hairline); border-radius: 4px;\n  padding: 18px 20px; display: flex; flex-direction: column; gap: 6px;\n}\n.card__company { font-size: 12px; font-family: var(--mono); color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }\n.card__title { font-size: 16px; font-weight: 650; margin: 0; }\n.card__meta { font-size: 12.5px; color: var(--ink-faint); }\n.card__footer { margin-top: 10px; display: flex; align-items: center; justify-content: space-between; }\n.badge {\n  font-family: var(--mono); font-size: 12px; padding: 3px 9px; border-radius: 3px; font-weight: 600;\n}\n.badge--good { color: var(--good); background: var(--good-bg); }\n.badge--mid { color: var(--mid); background: var(--mid-bg); }\n.badge--low { color: var(--low); background: var(--low-bg); }\n.badge--unknown, .badge--none { color: var(--unknown); background: var(--unknown-bg); }\n.card__link { font-size: 13px; font-weight: 600; color: var(--accent); text-decoration: none; }\n.card__link:hover { text-decoration: underline; }\n\n.detail-header { margin-bottom: 20px; }\n.detail-header h1 { margin: 0 0 4px; font-size: 24px; }\n.detail-header .sub { color: var(--ink-soft); font-size: 14.5px; }\n\n.jd-box { width: 100%; min-height: 240px; font-family: var(--mono); font-size: 13px;\n  border: 1px solid var(--hairline); border-radius: 4px; padding: 12px; resize: vertical; }\n.form-row { margin: 14px 0; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }\nlabel { font-size: 13.5px; color: var(--ink-soft); }\ninput[type=number] { width: 64px; font-family: var(--mono); padding: 4px 6px; border: 1px solid var(--hairline); border-radius: 3px; }\n\n.btn, .btn:link, .btn:visited {\n  font-family: var(--sans); font-size: 14px; font-weight: 650; padding: 10px 18px;\n  border-radius: 4px; border: none; cursor: pointer; background: var(--accent); color: #fff;\n  text-decoration: none; display: inline-block;\n}\n.btn:hover { opacity: 0.92; }\n.btn--secondary, .btn--secondary:link, .btn--secondary:visited {\n  background: var(--panel); color: var(--ink); border: 1px solid var(--hairline);\n}\n.card__link, .card__link:link, .card__link:visited { text-decoration: none; }\n.btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }\n\n.result-summary { display: flex; align-items: center; gap: 20px; background: var(--panel);\n  border: 1px solid var(--hairline); border-radius: 4px; padding: 20px; margin: 20px 0; }\n.result-summary .dial { min-width: 90px; }\n\n.spinner-wrap { text-align: center; padding: 80px 20px; }\n.spinner {\n  width: 36px; height: 36px; margin: 0 auto 20px; border-radius: 50%;\n  border: 3px solid var(--hairline); border-top-color: var(--accent);\n  animation: spin 0.8s linear infinite;\n}\n@keyframes spin { to { transform: rotate(360deg); } }\n\n.empty-state { color: var(--ink-faint); text-align: center; padding: 60px 20px; }\n\n.filter-bar { background: var(--panel); border: 1px solid var(--hairline); border-radius: 4px;\n  padding: 16px 18px; margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 14px 20px; align-items: flex-end; }\n.filter-bar .field { display: flex; flex-direction: column; gap: 4px; }\n.filter-bar input[type=text], .filter-bar input[type=date], .filter-bar select, .filter-bar input[type=number] {\n  font-family: var(--sans); font-size: 13.5px; padding: 6px 8px; border: 1px solid var(--hairline);\n  border-radius: 3px; width: auto; }\n.filter-bar .checkbox-field { display: flex; align-items: center; gap: 6px; }\n.filter-bar .checkbox-field label { margin: 0; }\n.filter-bar .actions { display: flex; gap: 8px; margin-left: auto; }\n.btn--small, .btn--small:link, .btn--small:visited { padding: 6px 14px; font-size: 13px; }\n\n.pagination { display: flex; justify-content: center; gap: 6px; margin-top: 28px; }\n.pagination a, .pagination span { font-family: var(--mono); font-size: 13px; padding: 6px 12px;\n  border: 1px solid var(--hairline); border-radius: 3px; text-decoration: none; color: var(--ink); }\n.pagination .current { background: var(--accent); color: #fff; border-color: var(--accent); }\n\ntextarea.manual-jd { width: 100%; min-height: 180px; font-family: var(--mono); font-size: 13px;\n  border: 1px solid var(--hairline); border-radius: 4px; padding: 12px; resize: vertical; }\ninput[type=text].wide { width: 100%; font-family: var(--sans); font-size: 14px; padding: 8px 10px;\n  border: 1px solid var(--hairline); border-radius: 4px; }\n'
+_DASHBOARD_STYLE = '\n.topbar {\n  background: var(--ink); color: #F6F7F5; padding: 18px 24px;\n}\n.topbar a { color: #F6F7F5; text-decoration: none; font-weight: 650; font-size: 15px; }\n.topbar__wrap { max-width: 1040px; margin: 0 auto; }\n.dash-wrap { max-width: 1040px; margin: 0 auto; padding: 28px 24px 96px; }\n\n.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }\n.card {\n  background: var(--panel); border: 1px solid var(--hairline); border-radius: 4px;\n  padding: 18px 20px; display: flex; flex-direction: column; gap: 6px;\n}\n.card__company { font-size: 12px; font-family: var(--mono); color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }\n.card__title { font-size: 16px; font-weight: 650; margin: 0; }\n.card__meta { font-size: 12.5px; color: var(--ink-faint); }\n.card__footer { margin-top: 10px; display: flex; align-items: center; justify-content: space-between; }\n.badge {\n  font-family: var(--mono); font-size: 12px; padding: 3px 9px; border-radius: 3px; font-weight: 600;\n}\n.badge--good { color: var(--good); background: var(--good-bg); }\n.badge--mid { color: var(--mid); background: var(--mid-bg); }\n.badge--low { color: var(--low); background: var(--low-bg); }\n.badge--unknown, .badge--none { color: var(--unknown); background: var(--unknown-bg); }\n.card__link { font-size: 13px; font-weight: 600; color: var(--accent); text-decoration: none; }\n.card__link:hover { text-decoration: underline; }\n\n.detail-header { margin-bottom: 20px; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }\n.detail-header h1 { margin: 0 0 4px; font-size: 24px; }\n.detail-header .sub { color: var(--ink-soft); font-size: 14.5px; width: 100%; }\n.inline-form { display: inline-block; }\n\n.score-batch-bar { background: var(--panel); border: 1px solid var(--hairline); border-radius: 4px;\n  padding: 12px 16px; margin-bottom: 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }\n.score-batch-bar .checkbox-field { display: flex; align-items: center; gap: 6px; }\n.score-batch-bar .checkbox-field label { margin: 0; }\n\n.jd-box { width: 100%; min-height: 240px; font-family: var(--mono); font-size: 13px;\n  border: 1px solid var(--hairline); border-radius: 4px; padding: 12px; resize: vertical; }\n.form-row { margin: 14px 0; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }\nlabel { font-size: 13.5px; color: var(--ink-soft); }\ninput[type=number] { width: 64px; font-family: var(--mono); padding: 4px 6px; border: 1px solid var(--hairline); border-radius: 3px; }\n\n.btn, .btn:link, .btn:visited {\n  font-family: var(--sans); font-size: 14px; font-weight: 650; padding: 10px 18px;\n  border-radius: 4px; border: none; cursor: pointer; background: var(--accent); color: #fff;\n  text-decoration: none; display: inline-block;\n}\n.btn:hover { opacity: 0.92; }\n.btn--secondary, .btn--secondary:link, .btn--secondary:visited {\n  background: var(--panel); color: var(--ink); border: 1px solid var(--hairline);\n}\n.card__link, .card__link:link, .card__link:visited { text-decoration: none; }\n.btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }\n\n.result-summary { display: flex; align-items: center; gap: 20px; background: var(--panel);\n  border: 1px solid var(--hairline); border-radius: 4px; padding: 20px; margin: 20px 0; }\n.result-summary .dial { min-width: 90px; }\n\n.spinner-wrap { text-align: center; padding: 80px 20px; }\n.spinner {\n  width: 36px; height: 36px; margin: 0 auto 20px; border-radius: 50%;\n  border: 3px solid var(--hairline); border-top-color: var(--accent);\n  animation: spin 0.8s linear infinite;\n}\n@keyframes spin { to { transform: rotate(360deg); } }\n\n.empty-state { color: var(--ink-faint); text-align: center; padding: 60px 20px; }\n\n.filter-bar { background: var(--panel); border: 1px solid var(--hairline); border-radius: 4px;\n  padding: 16px 18px; margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 14px 20px; align-items: flex-end; }\n.filter-bar .field { display: flex; flex-direction: column; gap: 4px; }\n.filter-bar input[type=text], .filter-bar input[type=date], .filter-bar select, .filter-bar input[type=number] {\n  font-family: var(--sans); font-size: 13.5px; padding: 6px 8px; border: 1px solid var(--hairline);\n  border-radius: 3px; width: auto; }\n.filter-bar .checkbox-field { display: flex; align-items: center; gap: 6px; }\n.filter-bar .checkbox-field label { margin: 0; }\n.filter-bar .actions { display: flex; gap: 8px; margin-left: auto; }\n.btn--small, .btn--small:link, .btn--small:visited { padding: 6px 14px; font-size: 13px; }\n\n.pagination { display: flex; justify-content: center; gap: 6px; margin-top: 28px; }\n.pagination a, .pagination span { font-family: var(--mono); font-size: 13px; padding: 6px 12px;\n  border: 1px solid var(--hairline); border-radius: 3px; text-decoration: none; color: var(--ink); }\n.pagination .current { background: var(--accent); color: #fff; border-color: var(--accent); }\n\ntextarea.manual-jd { width: 100%; min-height: 180px; font-family: var(--mono); font-size: 13px;\n  border: 1px solid var(--hairline); border-radius: 4px; padding: 12px; resize: vertical; }\ninput[type=text].wide { width: 100%; font-family: var(--sans); font-size: 14px; padding: 8px 10px;\n  border: 1px solid var(--hairline); border-radius: 4px; }\n'
 def _page(title: str, body: str) -> str:
     ...
 
@@ -340,6 +373,14 @@ def _distinct_companies(conn) -> list[str]:
 def _filter_bar_html(filters: dict, companies: list[str]) -> str:
     ...
 
+def _score_batch_form_html(filters: dict, matched_count: int) -> str:
+    """POSTs the CURRENT filter state (as hidden fields, exact mirror of"""
+    ...
+
+def _filtered_postings(conn, filters: dict) -> tuple[list[tuple], list[tuple]]:
+    """The SQL query + keyword/location filtering index() has always done,"""
+    ...
+
 def index():
     ...
 
@@ -350,6 +391,14 @@ def _generate_options_html() -> str:
     ...
 
 def generate(posting_id):
+    ...
+
+def run_scout_route():
+    """2026-08-10: dashboard-triggered Scout, reversing the CLI-only"""
+    ...
+
+def score_batch_route():
+    """2026-08-10: dashboard-triggered Scorer over the CURRENT filter set"""
     ...
 
 def job_status_page(job_id):
@@ -850,23 +899,22 @@ def run_revision_loop(llm: LLMClient, company_name: str, job_title: str, job_des
 # config field (most likely a search_criteria.yaml addition) before Scorer
 # can use them; not guessed here.
 #
-# CONFIG DEPENDENCY, confirmed against real roles.yaml: no `scorer_fit`
-# entry exists yet. LLMClient resolves role names purely from
-# config/roles.yaml, so this will fail with a lookup error until one is
-# added. Every existing role in your roles.yaml routes through Ollama
-# (gemma4:12b-mlx or qwen2.5:14b) except the still-unused mlx_smoke_test --
-# there is no cloud-routed role active in this file to mirror for a
-# "quality-sensitive" default the way the earlier draft assumed. Suggested
-# addition, consistent with your file's own local-first pattern (add to
-# config/roles.yaml, not done here since it's your file to own):
-#
-#     scorer_fit:
-#       provider: ollama
-#       model: qwen2.5:14b       # matches scout_summarizer's model -- a
-#                                 # cheap/fast local model is appropriate
-#                                 # here, this runs once per posting at
-#                                 # triage scale (hundreds of calls)
-#       base_url: http://localhost:11434
+# MODEL, resolved 2026-08-10 after real testing (not guessed): scorer_fit
+# originally pointed at gemma3:1b-it-qat, a "get it working" fast-model pick
+# that was never load-tested for format compliance. A real --debug run
+# showed exactly why that mattered -- the model's entire response was the
+# literal 9 characters "SCORE: 6
+# ", no paragraph, no rationale, not even
+# the dash separator parse_score() requires. Not a truncation or parsing
+# bug -- the model simply didn't attempt the instructed two-part format.
+# Switched to gemma4:12b-mlx (this project's proven quality-tier model,
+# already reliable elsewhere in this codebase for structured-output
+# instructions) after re-testing confirmed clean, well-differentiated
+# scores. Slower per call than a 1B model, accepted deliberately: a fast
+# wrong-shaped answer is worse than a slow right-shaped one for a triage
+# step whose entire output is a parsed number. See config/roles.yaml's own
+# scorer_fit comment for the full account -- kept in sync with this one,
+# not duplicated blind.
 #
 # INVOCATION, scoped deliberately: like run_scout(), this is driven from the
 # CLI (`biohunter score-postings`), not from the dashboard. The dashboard
@@ -876,6 +924,7 @@ def run_revision_loop(llm: LLMClient, company_name: str, job_title: str, job_des
 # button.
 
 SCORER_ROLE = 'scorer_fit'
+logger = logging.getLogger(__name__)
 SCORER_INSTRUCTION = "You are a candid, detail-oriented career advisor helping a candidate triage a large batch of job postings BEFORE they spend time generating a tailored resume for any of them. You are given the candidate's actual background (summary, skills, career history, education) and their stated location/title preferences, plus one job posting. Your job is to judge how good a FIT this posting is for this candidate -- NOT how good a resume could be written for it (that is a separate, later step). Be direct: a senior-only posting for a candidate with no matching seniority, or a posting far outside stated location preferences, should score low even if the subject-matter skills overlap well.\n\nConsider, in this order of importance: (1) role/skill/background alignment against the candidate's actual profile below -- don't assume relevance from the job title alone; (2) location fit against the candidate's stated preferences; (3) seniority fit (junior/mid/senior/staff+) based on the posting's title and description.\n\nDo NOT attempt to judge visa sponsorship or salary fit -- you have no data on either for this candidate; ignore those dimensions entirely rather than guessing.\n\nRespond with your assessment as one short paragraph, then end with exactly this line and nothing after it:\nSCORE: <integer 1-10> -- <one-sentence rationale>"
 def _build_candidate_profile_text() -> str:
     """Fetches the candidate's summary/skills/career-history/education"""

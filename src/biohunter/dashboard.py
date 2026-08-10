@@ -45,11 +45,34 @@ filtering is against postings.score (scorer.py's job-FIT score, run via
 `biohunter score-postings`), NOT drafts.final_score (Critic's resume-
 quality score, which only exists after a draft has been generated) --
 see the 2026-08-09 handoff for why those are two different things.
+
+2026-08-10 addition (dashboard-triggered Scout + Scorer): REVERSES a
+decision scorer.py's own docstring stated on purpose earlier the same
+session ("like run_scout(), this is driven from the CLI... not from the
+dashboard") -- naming that explicitly here rather than letting it happen
+quietly as a side effect of adding a button. Both new routes reuse the
+SAME background-job mechanism Generate already uses (_jobs/_set_job/
+_get_job, a daemon thread, /jobs/<job_id>.json polling) rather than a
+second mechanism -- the job dict now carries a "kind" field
+("generate" | "score_batch" | "scout") so job_status_page's polling JS
+can show the right progress shape for each, since only score_batch's
+total is known upfront (an exact filtered-posting count) and can show
+real "N of M" progress; scout's isn't -- run_scout()'s own module isn't
+in this codebase's dashboard.py dependency chain and wasn't re-verified
+before this was written, so its button intentionally shows an honest
+"running, can't report fine-grained progress" status rather than a
+fabricated progress bar. "Score these N filtered postings" runs Scorer
+over EXACTLY the postings-index's current filter set (same
+keyword_filter_match() call the cards already render from, via a shared
+_filtered_postings() helper extracted from index() for this) -- not a
+second, separate filter UI, per the 2026-08-10 handoff's explicit
+instruction.
 """
 from __future__ import annotations
 
 import argparse
 import html
+import json
 import logging
 import threading
 import uuid
@@ -57,7 +80,8 @@ import uuid
 from flask import Flask, Response, abort, redirect, request, url_for
 
 from . import drafts_db
-from .cli import DEFAULT_BAY_AREA_LOCATIONS, keyword_filter_match
+from .cli import DEFAULT_BAY_AREA_LOCATIONS, _log_run, keyword_filter_match
+from .config import load_search_criteria
 from .critic import ScoreResult, parse_score
 from .db import get_connection, init_schema
 from .diff import diff_revision_result
@@ -66,6 +90,8 @@ from .report import _STYLE as _REPORT_STYLE
 from .report import _score_bucket, render_posting_report
 from .resume_pdf import html_to_pdf_bytes, render_cover_letter_html, render_resume_html
 from .revision import run_revision_loop
+from .scorer import score_posting
+from .scout import run_scout
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +141,7 @@ def _run_generation(
     Opens its own DB connection rather than sharing the request's --
     libsql connections aren't guaranteed thread-safe to share across
     threads, and this thread outlives the request that started it."""
-    _set_job(job_id, status="running", posting_id=posting_id)
+    _set_job(job_id, status="running", posting_id=posting_id, kind="generate")
     try:
         client = LLMClient()
         result = run_revision_loop(
@@ -132,6 +158,112 @@ def _run_generation(
         _set_job(job_id, status="done", draft_id=draft_id)
     except Exception as exc:  # noqa: BLE001 -- surface any failure to the polling page, don't just log it
         logger.exception("generation failed for posting %s", posting_id)
+        _set_job(job_id, status="error", error=str(exc))
+
+
+def _run_score_batch(
+    job_id: str,
+    posting_rows: list[tuple],
+    rescore: bool,
+    think: bool,
+) -> None:
+    """Runs in a background thread, started by POST /postings/score-batch.
+    posting_rows is EXACTLY the filtered set the postings-index rendered
+    at click time (id, company, title, location, status, description) --
+    the caller already ran it through the same keyword_filter_match()
+    logic index() uses, this function does no filtering of its own.
+
+    Mirrors cli.py's cmd_score_postings loop deliberately -- same skip
+    condition (no description), same UPDATE statement (status only
+    flips 'new' -> 'scored', an already-'scored' or other-status row
+    keeps its status), same per-posting commit, same "still counts as
+    scored" treatment of an unparseable result (score/rationale written
+    as NULL rather than silently dropped) -- this is the second caller
+    of that write pattern, not a divergent one.
+
+    rescore: if False (the default, matching cli.py's own default),
+    postings whose status isn't 'new' are skipped without an LLM call --
+    same semantics as omitting --rescore on the CLI. If True, every
+    filtered posting with a description gets (re-)scored regardless of
+    current status.
+
+    Opens its own DB connection and its own LLMClient, same reasoning as
+    _run_generation: this thread outlives the request that started it.
+    """
+    total = len(posting_rows)
+    _set_job(job_id, status="running", kind="score_batch", total=total, scored=0, skipped=0, current="")
+    try:
+        criteria = load_search_criteria()
+        client = LLMClient()
+        conn = get_connection()
+        init_schema(conn)
+
+        scored = 0
+        skipped = 0
+        for posting_id, company, title, location, status, description in posting_rows:
+            _set_job(job_id, current=f"{company} -- {title}")
+            if not description:
+                skipped += 1
+                _set_job(job_id, skipped=skipped)
+                continue
+            if not rescore and status != "new":
+                skipped += 1
+                _set_job(job_id, skipped=skipped)
+                continue
+            result = score_posting(client, company, title, location, description, criteria, think=think)
+            conn.execute(
+                "UPDATE postings SET score = ?, score_rationale = ?, "
+                "status = CASE WHEN status = 'new' THEN 'scored' ELSE status END WHERE id = ?",
+                (result.score, result.rationale, posting_id),
+            )
+            conn.commit()
+            scored += 1
+            _set_job(job_id, scored=scored)
+
+        _set_job(job_id, status="done", scored=scored, skipped=skipped, total=total)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("score batch job %s failed", job_id)
+        _set_job(job_id, status="error", error=str(exc))
+
+
+def _run_scout_job(job_id: str) -> None:
+    """Runs in a background thread, started by POST /scout/run. Calls
+    run_scout() directly -- the same function cli.py's cmd_run_scout
+    calls -- and logs to run_log via cli.py's own _log_run(), reused
+    rather than duplicated (imported, not copy-pasted).
+
+    KNOWN GAP, stated rather than papered over: run_scout()'s own module
+    (src/biohunter/scout/) was not part of this session's uploads, so
+    whether it reports progress incrementally as it checks each company
+    is unverified. This function does NOT fabricate a per-company
+    progress count -- job_status_page shows an honest "running, can't
+    report fine-grained progress" message for kind='scout' rather than a
+    bar that might be lying. If run_scout() turns out to support a
+    progress callback, wiring real progress through here is a small
+    follow-up, not a rewrite.
+    """
+    _set_job(job_id, status="running", kind="scout")
+    try:
+        results = run_scout()
+        total_new = sum(r.new_postings for r in results)
+        errors = [r for r in results if r.strategy == "error"]
+
+        conn = get_connection()
+        init_schema(conn)
+        status = "ok" if not errors else "partial"
+        detail = json.dumps({
+            "companies_checked": len(results),
+            "new_postings": total_new,
+            "errors": [{"company": r.company_name, "error": r.error} for r in errors],
+        })
+        _log_run(conn, status, detail)
+
+        _set_job(
+            job_id, status="done",
+            companies_checked=len(results), new_postings=total_new, error_count=len(errors),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("scout job %s failed", job_id)
         _set_job(job_id, status="error", error=str(exc))
 
 
@@ -190,9 +322,15 @@ _DASHBOARD_STYLE = """
 .card__link { font-size: 13px; font-weight: 600; color: var(--accent); text-decoration: none; }
 .card__link:hover { text-decoration: underline; }
 
-.detail-header { margin-bottom: 20px; }
+.detail-header { margin-bottom: 20px; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
 .detail-header h1 { margin: 0 0 4px; font-size: 24px; }
-.detail-header .sub { color: var(--ink-soft); font-size: 14.5px; }
+.detail-header .sub { color: var(--ink-soft); font-size: 14.5px; width: 100%; }
+.inline-form { display: inline-block; }
+
+.score-batch-bar { background: var(--panel); border: 1px solid var(--hairline); border-radius: 4px;
+  padding: 12px 16px; margin-bottom: 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.score-batch-bar .checkbox-field { display: flex; align-items: center; gap: 6px; }
+.score-batch-bar .checkbox-field label { margin: 0; }
 
 .jd-box { width: 100%; min-height: 240px; font-family: var(--mono); font-size: 13px;
   border: 1px solid var(--hairline); border-radius: 4px; padding: 12px; resize: vertical; }
@@ -362,21 +500,54 @@ def _filter_bar_html(filters: dict, companies: list[str]) -> str:
 </form>"""
 
 
+def _score_batch_form_html(filters: dict, matched_count: int) -> str:
+    """POSTs the CURRENT filter state (as hidden fields, exact mirror of
+    what _filter_bar_html's GET form holds) to /postings/score-batch, so
+    Scorer runs over exactly the filtered set the cards were rendered
+    from -- see _filtered_postings()'s docstring for why this isn't a
+    second filter implementation."""
+    if matched_count == 0:
+        return ""
+    hidden = "".join(
+        f'<input type="hidden" name="{name}" value="{_esc(str(value))}">'
+        for name, value in [
+            ("keyword", filters["keyword"]), ("location", filters["location"]),
+            ("bay_area", "1" if filters["bay_area"] else ""), ("company", filters["company"]),
+            ("date_from", filters["date_from"]), ("date_to", filters["date_to"]),
+            ("min_score", filters["min_score"]),
+        ] if value
+    )
+    return f"""<form class="score-batch-bar" method="post" action="{url_for('score_batch_route')}">
+  {hidden}
+  <span>Score these <strong>{matched_count}</strong> filtered posting(s) with Scorer</span>
+  <div class="checkbox-field">
+    <input type="checkbox" id="sb-rescore" name="rescore" value="1">
+    <label for="sb-rescore">Include already-scored (rescore)</label>
+  </div>
+  <button class="btn btn--small" type="submit">Score filtered postings</button>
+</form>"""
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
 
-@app.route("/")
-def index():
-    conn = get_connection()
-    init_schema(conn)
+def _filtered_postings(conn, filters: dict) -> tuple[list[tuple], list[tuple]]:
+    """The SQL query + keyword/location filtering index() has always done,
+    extracted so POST /postings/score-batch can run Scorer over EXACTLY
+    the same filtered set the cards were rendered from -- one filtering
+    implementation, two callers, not a second filter UI/logic path per
+    the 2026-08-10 handoff's explicit instruction.
 
-    filters = _parse_filters(request.args)
-
+    Returns (all_rows, filtered_rows); each row is (id, company, title,
+    location, status, score, first_seen_at, description) -- description
+    added (index() itself doesn't use it, only ignores the extra column)
+    so score-batch doesn't need a second query to fetch it.
+    """
     query = """
         SELECT postings.id, companies.name, postings.title, postings.location,
-               postings.status, postings.score, postings.first_seen_at
+               postings.status, postings.score, postings.first_seen_at, postings.description
         FROM postings JOIN companies ON postings.company_id = companies.id
         WHERE postings.status != 'stale'
     """
@@ -397,14 +568,22 @@ def index():
 
     all_rows = conn.execute(query, tuple(params)).fetchall()
 
-    # Keyword/location matching stays in Python, reusing cli.py's exact
-    # predicate -- see module docstring for why.
     location_include = DEFAULT_BAY_AREA_LOCATIONS if filters["bay_area"] else filters["location_list"]
     filtered_rows = [
         row for row in all_rows
         if keyword_filter_match(row[2], filters["keyword_list"], [])
         and keyword_filter_match(row[3] or "", location_include, [])
     ]
+    return all_rows, filtered_rows
+
+
+@app.route("/")
+def index():
+    conn = get_connection()
+    init_schema(conn)
+
+    filters = _parse_filters(request.args)
+    all_rows, filtered_rows = _filtered_postings(conn, filters)
 
     drafts_by_posting = drafts_db.latest_draft_index(conn)
     companies = _distinct_companies(conn)
@@ -417,17 +596,20 @@ def index():
     page_rows = filtered_rows[(page - 1) * per_page : page * per_page]
 
     add_manual_link = f'<a class="btn btn--secondary btn--small" href="{url_for("posting_manual_form")}">+ Add posting manually</a>'
+    run_scout_form = f"""<form method="post" action="{url_for('run_scout_route')}" class="inline-form">
+      <button class="btn btn--small" type="submit">Run Scout</button></form>"""
+    score_batch_form = _score_batch_form_html(filters, total)
 
     if not all_rows:
         body = f"""<div class="dash-wrap">
-  <div class="detail-header"><h1>Postings</h1></div>
+  <div class="detail-header"><h1>Postings</h1>{run_scout_form}</div>
   {filter_bar}
-  <div class="empty-state">No postings yet — run <code>biohunter run-scout</code> first, or {add_manual_link}.</div>
+  <div class="empty-state">No postings yet — click Run Scout above, or {add_manual_link}.</div>
 </div>"""
         return _page("Postings", body)
 
     cards = []
-    for posting_id, company, title, location, status, score, _first_seen_at in page_rows:
+    for posting_id, company, title, location, status, score, _first_seen_at, _description in page_rows:
         draft = drafts_by_posting.get(posting_id)
         quality_score = draft.final_score if draft else None
         link = (
@@ -456,9 +638,10 @@ def index():
         pagination_html = f'<div class="pagination">{"".join(links)}</div>'
 
     body = f"""<div class="dash-wrap">
-  <div class="detail-header"><h1>Postings</h1>
+  <div class="detail-header"><h1>Postings</h1>{run_scout_form}
     <p class="sub">{total} posting(s) match &middot; {len(all_rows)} total (excluding stale) &middot; {add_manual_link}</p></div>
   {filter_bar}
+  {score_batch_form}
   <div class="grid">{''.join(cards)}</div>
   {pagination_html}
 </div>"""
@@ -550,11 +733,52 @@ def generate(posting_id):
     think = request.form.get("think") == "on"
 
     job_id = uuid.uuid4().hex[:12]
-    _set_job(job_id, status="queued", posting_id=posting_id)
+    _set_job(job_id, status="queued", posting_id=posting_id, kind="generate")
     thread = threading.Thread(
         target=_run_generation,
         args=(job_id, posting_id, posting["company"], posting["title"], description, revision_rounds, think),
         daemon=True,
+    )
+    thread.start()
+    return redirect(url_for("job_status_page", job_id=job_id))
+
+
+@app.route("/scout/run", methods=["POST"])
+def run_scout_route():
+    """2026-08-10: dashboard-triggered Scout, reversing the CLI-only
+    precedent -- see module docstring. Same job-thread mechanism as
+    generate(); run_scout() itself takes no arguments (it reads
+    companies.yaml on its own, same as cmd_run_scout), so there's no
+    form data to read here."""
+    job_id = uuid.uuid4().hex[:12]
+    _set_job(job_id, status="queued", kind="scout")
+    thread = threading.Thread(target=_run_scout_job, args=(job_id,), daemon=True)
+    thread.start()
+    return redirect(url_for("job_status_page", job_id=job_id))
+
+
+@app.route("/postings/score-batch", methods=["POST"])
+def score_batch_route():
+    """2026-08-10: dashboard-triggered Scorer over the CURRENT filter set
+    -- reversing scorer.py's own "CLI-only" precedent, see module
+    docstring. Re-derives filters from the posted hidden fields (same
+    _parse_filters()/_filtered_postings() index() itself uses) rather
+    than trusting a posting-id list from the client, so the scored set
+    can never drift from what the filter bar actually shows."""
+    conn = get_connection()
+    init_schema(conn)
+    filters = _parse_filters(request.form)
+    _all_rows, filtered_rows = _filtered_postings(conn, filters)
+    # Drop score/first_seen_at (index columns _run_score_batch doesn't need);
+    # keep id/company/title/location/status/description in that order.
+    posting_rows = [(r[0], r[1], r[2], r[3], r[4], r[7]) for r in filtered_rows]
+    rescore = request.form.get("rescore") == "1"
+    think = request.form.get("think") == "on"
+
+    job_id = uuid.uuid4().hex[:12]
+    _set_job(job_id, status="queued", kind="score_batch", total=len(posting_rows), scored=0, skipped=0)
+    thread = threading.Thread(
+        target=_run_score_batch, args=(job_id, posting_rows, rescore, think), daemon=True,
     )
     thread.start()
     return redirect(url_for("job_status_page", job_id=job_id))
@@ -568,16 +792,46 @@ def job_status_page(job_id):
     body = f"""<div class="dash-wrap"><div class="spinner-wrap">
   <div class="spinner"></div>
   <p id="status">Starting…</p>
+  <p id="detail" style="font-size:13px;color:var(--ink-faint);"></p>
+  <p id="done-link"></p>
 </div></div>
 <script>
 async function poll() {{
   const r = await fetch("{url_for('job_status_json', job_id=job_id)}");
   const j = await r.json();
   const el = document.getElementById("status");
+  const detailEl = document.getElementById("detail");
+  const linkEl = document.getElementById("done-link");
+
   if (j.status === "done") {{
-    window.location = "/postings/" + j.posting_id;
+    if (j.kind === "generate") {{
+      window.location = "/postings/" + j.posting_id;
+      return;
+    }}
+    if (j.kind === "score_batch") {{
+      el.textContent = "Done.";
+      detailEl.textContent = `Scored ${{j.scored}}, skipped ${{j.skipped}}, of ${{j.total}} filtered posting(s).`;
+    }} else if (j.kind === "scout") {{
+      el.textContent = "Done.";
+      detailEl.textContent = `${{j.companies_checked}} companies checked, ${{j.new_postings}} new posting(s)` +
+        (j.error_count ? `, ${{j.error_count}} error(s) -- see run_log for detail.` : ".");
+    }} else {{
+      el.textContent = "Done.";
+    }}
+    linkEl.innerHTML = '<a class="btn btn--small" href="{url_for("index")}">View postings</a>';
+    return;
   }} else if (j.status === "error") {{
-    el.textContent = "Generation failed: " + j.error;
+    el.textContent = "Failed: " + j.error;
+    return;
+  }} else if (j.kind === "score_batch") {{
+    el.textContent = j.status === "running" ? "Scoring\\u2026" : "Queued\\u2026";
+    detailEl.textContent = `${{j.scored || 0}} scored, ${{j.skipped || 0}} skipped, of ${{j.total}} filtered posting(s)` +
+      (j.current ? ` \\u2014 currently: ${{j.current}}` : "");
+    setTimeout(poll, 2000);
+  }} else if (j.kind === "scout") {{
+    el.textContent = j.status === "running" ? "Running Scout\\u2026" : "Queued\\u2026";
+    detailEl.textContent = "Checking company career pages -- can take several minutes; fine-grained progress isn't available for this job.";
+    setTimeout(poll, 2500);
   }} else {{
     el.textContent = j.status === "running" ? "Running Writer \\u2192 Critic \\u2192 Revision\\u2026 (a few minutes on local models)" : "Queued\\u2026";
     setTimeout(poll, 2500);
@@ -585,7 +839,7 @@ async function poll() {{
 }}
 poll();
 </script>"""
-    return _page("Generating", body)
+    return _page("Job status", body)
 
 
 @app.route("/jobs/<job_id>.json")
