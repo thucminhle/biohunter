@@ -55,14 +55,13 @@ SAME background-job mechanism Generate already uses (_jobs/_set_job/
 _get_job, a daemon thread, /jobs/<job_id>.json polling) rather than a
 second mechanism -- the job dict now carries a "kind" field
 ("generate" | "score_batch" | "scout") so job_status_page's polling JS
-can show the right progress shape for each, since only score_batch's
-total is known upfront (an exact filtered-posting count) and can show
-real "N of M" progress; scout's isn't -- run_scout()'s own module isn't
-in this codebase's dashboard.py dependency chain and wasn't re-verified
-before this was written, so its button intentionally shows an honest
-"running, can't report fine-grained progress" status rather than a
-fabricated progress bar. "Score these N filtered postings" runs Scorer
-over EXACTLY the postings-index's current filter set (same
+can show the right progress shape for each. score_batch's total is an
+exact filtered-posting count, known upfront. scout's per-company
+progress uses run_scout()'s on_company_done callback (added to
+detector.py the same day this dashboard integration was built,
+specifically to close this gap -- confirmed working in a real browser
+run, not just wired blind). "Score these N filtered postings" runs
+Scorer over EXACTLY the postings-index's current filter set (same
 keyword_filter_match() call the cards already render from, via a shared
 _filtered_postings() helper extracted from index() for this) -- not a
 second, separate filter UI, per the 2026-08-10 handoff's explicit
@@ -81,7 +80,7 @@ from flask import Flask, Response, abort, redirect, request, url_for
 
 from . import drafts_db
 from .cli import DEFAULT_BAY_AREA_LOCATIONS, _log_run, keyword_filter_match
-from .config import load_search_criteria
+from .config import load_companies, load_search_criteria
 from .critic import ScoreResult, parse_score
 from .db import get_connection, init_schema
 from .diff import diff_revision_result
@@ -232,19 +231,38 @@ def _run_scout_job(job_id: str) -> None:
     calls -- and logs to run_log via cli.py's own _log_run(), reused
     rather than duplicated (imported, not copy-pasted).
 
-    KNOWN GAP, stated rather than papered over: run_scout()'s own module
-    (src/biohunter/scout/) was not part of this session's uploads, so
-    whether it reports progress incrementally as it checks each company
-    is unverified. This function does NOT fabricate a per-company
-    progress count -- job_status_page shows an honest "running, can't
-    report fine-grained progress" message for kind='scout' rather than a
-    bar that might be lying. If run_scout() turns out to support a
-    progress callback, wiring real progress through here is a small
-    follow-up, not a rewrite.
+    2026-08-10: wired to run_scout()'s on_company_done callback (added
+    to detector.py the same day specifically to close this gap -- see
+    that function's own docstring). Real per-company progress now,
+    replacing the earlier honest-but-generic "can't report progress"
+    message from before that parameter existed. total_companies comes
+    from load_companies() up front, same source run_scout() itself
+    iterates -- if that call fails for any reason, total_companies stays
+    None and job_status_page's JS falls back to "checked N companies"
+    with no "of M", rather than crashing the job.
     """
-    _set_job(job_id, status="running", kind="scout")
     try:
-        results = run_scout()
+        total_companies = len(load_companies())
+    except Exception:  # noqa: BLE001 -- a failure here shouldn't block Scout itself
+        total_companies = None
+
+    _set_job(
+        job_id, status="running", kind="scout",
+        companies_done=0, total_companies=total_companies,
+        new_postings_so_far=0, current_company="",
+    )
+
+    def _on_company_done(result) -> None:
+        job = _get_job(job_id) or {}
+        _set_job(
+            job_id,
+            companies_done=job.get("companies_done", 0) + 1,
+            new_postings_so_far=job.get("new_postings_so_far", 0) + result.new_postings,
+            current_company=result.company_name,
+        )
+
+    try:
+        results = run_scout(on_company_done=_on_company_done)
         total_new = sum(r.new_postings for r in results)
         errors = [r for r in results if r.strategy == "error"]
 
@@ -830,8 +848,11 @@ async function poll() {{
     setTimeout(poll, 2000);
   }} else if (j.kind === "scout") {{
     el.textContent = j.status === "running" ? "Running Scout\\u2026" : "Queued\\u2026";
-    detailEl.textContent = "Checking company career pages -- can take several minutes; fine-grained progress isn't available for this job.";
-    setTimeout(poll, 2500);
+    const ofTotal = j.total_companies ? ` of ${{j.total_companies}}` : "";
+    detailEl.textContent = `Checked ${{j.companies_done || 0}}${{ofTotal}} companies` +
+      (j.current_company ? ` \\u2014 last: ${{j.current_company}}` : "") +
+      ` \\u2014 ${{j.new_postings_so_far || 0}} new posting(s) so far.`;
+    setTimeout(poll, 1500);
   }} else {{
     el.textContent = j.status === "running" ? "Running Writer \\u2192 Critic \\u2192 Revision\\u2026 (a few minutes on local models)" : "Queued\\u2026";
     setTimeout(poll, 2500);

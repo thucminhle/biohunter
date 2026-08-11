@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+from typing import Callable
 
 from bs4 import BeautifulSoup
 
@@ -155,7 +156,11 @@ def _mark_stale_postings(conn, company_id: int, run_time: datetime.datetime) -> 
 
 
 
-def run_scout(limiter: RateLimiter | None = None, db_path: str | None = None) -> list[ScoutResult]:
+def run_scout(
+    limiter: RateLimiter | None = None,
+    db_path: str | None = None,
+    on_company_done: Callable[[ScoutResult], None] | None = None,
+) -> list[ScoutResult]:
     """One Scout pass over every active company in the registry.
 
     Returns per-company results for the caller (Captain, or the CLI) to log
@@ -164,6 +169,20 @@ def run_scout(limiter: RateLimiter | None = None, db_path: str | None = None) ->
 
     `db_path` lets tests point at an isolated tmp db instead of the shared
     data/biohunter.db file.
+
+    `on_company_done`, added to close the dashboard's own documented gap
+    (dashboard.py's _run_scout_job() previously couldn't report real
+    per-company progress because this function gave it nothing to hook
+    into): called once per company, right after that company's
+    ScoutResult is appended to `results` below -- same company, same
+    result object, no separate bookkeeping. Optional and keyword-only in
+    spirit (though not enforced positionally, to avoid breaking any
+    existing positional call) so every existing caller (cmd_run_scout,
+    tests) keeps working with zero changes. Exceptions raised inside the
+    callback are NOT caught here -- a broken progress callback should be
+    visible immediately, not silently swallowed the way a single
+    company's own fetch failure already is (see the try/except below,
+    which is deliberately scoped to fetch/parse work only).
     """
     limiter = limiter or RateLimiter()
     conn = get_connection(db_path)
@@ -185,19 +204,21 @@ def run_scout(limiter: RateLimiter | None = None, db_path: str | None = None) ->
                 )
                 conn.commit()
                 _mark_stale_postings(conn, company_id, run_time)
-                results.append(
-                    ScoutResult(company.name, "ats", new_count, len(postings))
-                )
+                result = ScoutResult(company.name, "ats", new_count, len(postings))
+                results.append(result)
+                if on_company_done:
+                    on_company_done(result)
 
             else:
                 if not company.css_selector:
-                    results.append(
-                        ScoutResult(
-                            company.name, "error", 0, 0,
-                            error="No ats_type and no css_selector configured -- "
-                                  "add one to companies.yaml before Scout can monitor this company.",
-                        )
+                    result = ScoutResult(
+                        company.name, "error", 0, 0,
+                        error="No ats_type and no css_selector configured -- "
+                              "add one to companies.yaml before Scout can monitor this company.",
                     )
+                    results.append(result)
+                    if on_company_done:
+                        on_company_done(result)
                     continue
 
                 html = scraper.fetch_page(company.careers_url, limiter)
@@ -212,13 +233,14 @@ def run_scout(limiter: RateLimiter | None = None, db_path: str | None = None) ->
                     postings = scraper.extract_postings(html, company.css_selector, company.careers_url)
                     new_count = _upsert_postings(conn, company_id, postings)
                     if not postings:
-                        results.append(
-                            ScoutResult(
-                                company.name, "error", 0, 0,
-                                error="Page content changed but css_selector matched zero "
-                                      "listings -- selector likely needs manual review.",
-                            )
+                        result = ScoutResult(
+                            company.name, "error", 0, 0,
+                            error="Page content changed but css_selector matched zero "
+                                  "listings -- selector likely needs manual review.",
                         )
+                        results.append(result)
+                        if on_company_done:
+                            on_company_done(result)
                         continue
 
                 conn.execute(
@@ -227,10 +249,16 @@ def run_scout(limiter: RateLimiter | None = None, db_path: str | None = None) ->
                 )
                 conn.commit()
                 _mark_stale_postings(conn, company_id, run_time)
-                results.append(ScoutResult(company.name, "scrape", new_count, new_count))
+                result = ScoutResult(company.name, "scrape", new_count, new_count)
+                results.append(result)
+                if on_company_done:
+                    on_company_done(result)
 
         except Exception as exc:  # noqa: BLE001 -- intentionally broad: one company's
             # failure (network error, HTTP error, parse error) must not abort the whole run.
-            results.append(ScoutResult(company.name, "error", 0, 0, error=str(exc)))
+            result = ScoutResult(company.name, "error", 0, 0, error=str(exc))
+            results.append(result)
+            if on_company_done:
+                on_company_done(result)
 
     return results

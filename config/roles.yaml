@@ -43,10 +43,15 @@ writer_coverletter:
   model: gemma4:12b-mlx
   base_url: http://localhost:11434
 
-# Critic's blind-review pass (ADR-0006 Phase 2 item #1). Routed to
-# Anthropic on the same reasoning as writer_coverletter and
-# networker_email_draft: quality-sensitive, low-volume, worth the cloud
-# cost. Change freely if you'd rather run this locally.
+# Critic's blind-review pass (ADR-0006 Phase 2 item #1). Comment
+# corrected 2026-08-10 -- previously said "Routed to Anthropic on the
+# same reasoning as writer_coverletter and networker_email_draft," but
+# actual config below has always been ollama/gemma4:12b-mlx; comment and
+# config had drifted apart (same class of staleness scorer_fit's own
+# comment had, fixed the same session). Local gemma4:12b-mlx has proven
+# reliable for this project's structured-output needs elsewhere
+# (writer_selection, scorer_fit) -- change to Anthropic if you actually
+# want cloud-routed critique quality, but that's not what's running now.
 critic_review:
   provider: ollama
   model: gemma4:12b-mlx

@@ -310,14 +310,13 @@ def parse_score(critique_text: str) -> ScoreResult:
 # _get_job, a daemon thread, /jobs/<job_id>.json polling) rather than a
 # second mechanism -- the job dict now carries a "kind" field
 # ("generate" | "score_batch" | "scout") so job_status_page's polling JS
-# can show the right progress shape for each, since only score_batch's
-# total is known upfront (an exact filtered-posting count) and can show
-# real "N of M" progress; scout's isn't -- run_scout()'s own module isn't
-# in this codebase's dashboard.py dependency chain and wasn't re-verified
-# before this was written, so its button intentionally shows an honest
-# "running, can't report fine-grained progress" status rather than a
-# fabricated progress bar. "Score these N filtered postings" runs Scorer
-# over EXACTLY the postings-index's current filter set (same
+# can show the right progress shape for each. score_batch's total is an
+# exact filtered-posting count, known upfront. scout's per-company
+# progress uses run_scout()'s on_company_done callback (added to
+# detector.py the same day this dashboard integration was built,
+# specifically to close this gap -- confirmed working in a real browser
+# run, not just wired blind). "Score these N filtered postings" runs
+# Scorer over EXACTLY the postings-index's current filter set (same
 # keyword_filter_match() call the cards already render from, via a shared
 # _filtered_postings() helper extracted from index() for this) -- not a
 # second, separate filter UI, per the 2026-08-10 handoff's explicit
@@ -965,7 +964,7 @@ def _mark_stale_postings(conn, company_id: int, run_time: datetime.datetime) -> 
     """Mark postings not seen in this company's last STALE_AFTER_DAYS worth"""
     ...
 
-def run_scout(limiter: RateLimiter | None=None, db_path: str | None=None) -> list[ScoutResult]:
+def run_scout(limiter: RateLimiter | None=None, db_path: str | None=None, on_company_done: Callable[[ScoutResult], None] | None=None) -> list[ScoutResult]:
     """One Scout pass over every active company in the registry."""
     ...
 
@@ -1003,6 +1002,10 @@ def extract_postings(html: str, css_selector: str, base_url: str) -> list[RawPos
 
 def check_for_change(html: str, previous_hash: str | None) -> tuple[bool, str]:
     """Returns (changed, new_hash). If css_selector-based extraction later"""
+    ...
+
+def check_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | None, str]:
+    """Checks whether a stored posting URL still resolves to a real"""
     ...
 
 ```
