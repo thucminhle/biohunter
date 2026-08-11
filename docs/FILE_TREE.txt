@@ -32,7 +32,8 @@
 │   │   ├── 2026-08-09_BioHunter-Dashboard-Filtering-ManualAdd-Handoff.md
 │   │   ├── 2026-08-10_1_BioHunter-Scorer-DescriptionFetch-PreFilter-Handoff.md
 │   │   ├── 2026-08-10_2_BioHunter-PreFilter-ScorerModelFix-DashboardButtons-Handoff.md
-│   │   └── 2026-08-10_3_BioHunter-4b-BrowserConfirmed-ScoutProgress-Handoff.md
+│   │   ├── 2026-08-10_3_BioHunter-4b-BrowserConfirmed-ScoutProgress-Handoff.md
+│   │   └── 2026-08-10_4_BioHunter-ScoutProgressConfirmedLive-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md
