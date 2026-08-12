@@ -54,14 +54,14 @@ quietly as a side effect of adding a button. Both new routes reuse the
 SAME background-job mechanism Generate already uses (_jobs/_set_job/
 _get_job, a daemon thread, /jobs/<job_id>.json polling) rather than a
 second mechanism -- the job dict now carries a "kind" field
-("generate" | "score_batch" | "scout") so job_status_page's polling JS
-can show the right progress shape for each. score_batch's total is an
-exact filtered-posting count, known upfront. scout's per-company
-progress uses run_scout()'s on_company_done callback (added to
-detector.py the same day this dashboard integration was built,
-specifically to close this gap -- confirmed working in a real browser
-run, not just wired blind). "Score these N filtered postings" runs
-Scorer over EXACTLY the postings-index's current filter set (same
+("generate" | "score_batch" | "scout" | "dead_link_check") so job_status_page's polling JS
+can show the right progress shape for each. Scout's "N of M companies
+checked" progress (added once detector.py's run_scout() was actually
+seen and confirmed to accept an on_company_done callback) uses the same
+real-count approach score_batch already established -- not a fabricated
+bar, an actual per-company count driven by run_scout()'s own callback.
+"Score these N filtered postings" runs Scorer
+over EXACTLY the postings-index's current filter set (same
 keyword_filter_match() call the cards already render from, via a shared
 _filtered_postings() helper extracted from index() for this) -- not a
 second, separate filter UI, per the 2026-08-10 handoff's explicit
@@ -70,6 +70,7 @@ instruction.
 from __future__ import annotations
 
 import argparse
+import collections
 import html
 import json
 import logging
@@ -91,6 +92,8 @@ from .resume_pdf import html_to_pdf_bytes, render_cover_letter_html, render_resu
 from .revision import run_revision_loop
 from .scorer import score_posting
 from .scout import run_scout
+from .scout.ratelimit import RateLimiter
+from .scout.scraper import check_url_alive
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +128,43 @@ def _get_job(job_id: str) -> dict | None:
     with _jobs_lock:
         job = _jobs.get(job_id)
         return dict(job) if job is not None else None
+
+
+@app.route("/jobs")
+def jobs_index():
+    """Lists every job this dashboard process has run since it started --
+    added after a real session where navigating away from a finished
+    check-dead-links results page (an accidental click, nothing more)
+    left no way back except digging through browser history or the Flask
+    console log. _jobs is in-memory only, so this only shows jobs from
+    the CURRENT process -- a restart clears it, same as every other job
+    result in this file. Newest first."""
+    with _jobs_lock:
+        items = sorted(_jobs.items(), key=lambda kv: kv[0], reverse=True)
+
+    def _job_link(job_id: str, job: dict) -> str:
+        kind = job.get("kind", "unknown")
+        status = job.get("status", "unknown")
+        if kind == "dead_link_check" and status == "done":
+            href = url_for("dead_links_results", job_id=job_id)
+            detail = f"{len(job.get('dead', []))} dead, {len(job.get('uncertain', []))} inconclusive"
+        else:
+            href = url_for("job_status_page", job_id=job_id)
+            detail = status
+        return f"""<div class="card">
+  <div class="card__company">{_esc(kind)}</div>
+  <h3 class="card__title"><a href="{href}">{_esc(job_id)}</a></h3>
+  <div class="card__meta">{_esc(detail)}</div>
+</div>"""
+
+    cards = "".join(_job_link(jid, j) for jid, j in items) or '<div class="empty-state">No jobs run yet this session.</div>'
+    body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Recent jobs</h1></div>
+  <p class="sub">Jobs run since this dashboard process started -- lost when it restarts.</p>
+  <div class="grid">{cards}</div>
+  <p class="sub" style="margin-top:16px;"><a class="btn btn--secondary btn--small" href="{url_for('index')}">Back to postings</a></p>
+</div>"""
+    return _page("Recent jobs", body)
 
 
 def _run_generation(
@@ -231,33 +271,28 @@ def _run_scout_job(job_id: str) -> None:
     calls -- and logs to run_log via cli.py's own _log_run(), reused
     rather than duplicated (imported, not copy-pasted).
 
-    2026-08-10: wired to run_scout()'s on_company_done callback (added
-    to detector.py the same day specifically to close this gap -- see
-    that function's own docstring). Real per-company progress now,
-    replacing the earlier honest-but-generic "can't report progress"
-    message from before that parameter existed. total_companies comes
-    from load_companies() up front, same source run_scout() itself
-    iterates -- if that call fails for any reason, total_companies stays
-    None and job_status_page's JS falls back to "checked N companies"
-    with no "of M", rather than crashing the job.
+    GAP CLOSED (was previously stated rather than papered over): earlier
+    sessions couldn't wire real per-company progress because run_scout()
+    itself gave nothing to hook into -- it built its whole results list
+    in-memory and only returned once, after every company was checked.
+    Now that detector.py has been seen, run_scout() takes an optional
+    `on_company_done` callback, called once per company right after that
+    company's ScoutResult exists. This function passes a small closure
+    that updates the job dict (via the same _set_job() every other job
+    kind already uses) with the running total-so-far, same pattern
+    _run_score_batch() already uses per-posting -- one implementation
+    style, not a divergent one. total_companies is set up front from
+    load_companies() so the status line can show "N of M", not just "N
+    so far" with no denominator.
     """
-    try:
-        total_companies = len(load_companies())
-    except Exception:  # noqa: BLE001 -- a failure here shouldn't block Scout itself
-        total_companies = None
-
-    _set_job(
-        job_id, status="running", kind="scout",
-        companies_done=0, total_companies=total_companies,
-        new_postings_so_far=0, current_company="",
-    )
+    _set_job(job_id, status="running", kind="scout", companies_done=0,
+              total_companies=len(load_companies()), current_company="")
 
     def _on_company_done(result) -> None:
         job = _get_job(job_id) or {}
         _set_job(
             job_id,
             companies_done=job.get("companies_done", 0) + 1,
-            new_postings_so_far=job.get("new_postings_so_far", 0) + result.new_postings,
             current_company=result.company_name,
         )
 
@@ -282,6 +317,56 @@ def _run_scout_job(job_id: str) -> None:
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("scout job %s failed", job_id)
+        _set_job(job_id, status="error", error=str(exc))
+
+
+def _run_dead_link_check_job(job_id: str, posting_rows: list[tuple]) -> None:
+    """Runs in a background thread, started by POST /postings/check-dead-links.
+    posting_rows is (id, company, title, url) for every non-stale posting in
+    the DB at click time -- a real per-posting HTTP check, not a heuristic,
+    answering exactly the question a person clicking 'original posting' and
+    getting a 404 already answers by hand, just at scale.
+
+    Results (dead + uncertain lists) are held in the job dict and read by
+    dead_links_results() once the job finishes -- POST /postings/mark-stale
+    is the only route that actually writes status='stale', and only for
+    posting_ids a person explicitly checked and submitted.
+
+    Uses one shared RateLimiter across the whole sweep so per-domain
+    politeness (the same one Scout's own fetches respect) applies across
+    hundreds of postings hitting a handful of ATS domains, not a fresh
+    limiter (and fresh cooldown state) per posting.
+
+    `uncertain` is now a full list (id/company/title/url/detail), not
+    just a count -- added after the first real run surfaced 153/947
+    (16%) inconclusive with no way to see WHICH postings or WHY, a
+    number too large to leave unexamined. Kept read-only on the results
+    page (no checkbox, no mark-stale action) since "inconclusive" is
+    explicitly not a dead-link claim -- see check_url_alive()'s and
+    _check_workday_url_alive()'s own docstrings for why guessing here
+    would risk false positives the confident-dead list is built to
+    avoid.
+    """
+    total = len(posting_rows)
+    _set_job(job_id, status="running", kind="dead_link_check", total=total,
+              checked=0, dead=[], uncertain=[], current="")
+    limiter = RateLimiter()
+    try:
+        dead: list[dict] = []
+        uncertain: list[dict] = []
+        for i, (posting_id, company, title, url) in enumerate(posting_rows, start=1):
+            _set_job(job_id, current=f"{company} -- {title}")
+            is_alive, detail = check_url_alive(url, limiter)
+            entry = {"id": posting_id, "company": company, "title": title, "url": url, "detail": detail}
+            if is_alive is False:
+                dead.append(entry)
+            elif is_alive is None:
+                uncertain.append(entry)
+            _set_job(job_id, checked=i, dead=dead, uncertain=uncertain)
+
+        _set_job(job_id, status="done", checked=total, dead=dead, uncertain=uncertain)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("dead link check job %s failed", job_id)
         _set_job(job_id, status="error", error=str(exc))
 
 
@@ -616,11 +701,16 @@ def index():
     add_manual_link = f'<a class="btn btn--secondary btn--small" href="{url_for("posting_manual_form")}">+ Add posting manually</a>'
     run_scout_form = f"""<form method="post" action="{url_for('run_scout_route')}" class="inline-form">
       <button class="btn btn--small" type="submit">Run Scout</button></form>"""
+    dead_link_form = f"""<form method="post" action="{url_for('check_dead_links_route')}" class="inline-form">
+      <button class="btn btn--small btn--secondary" type="submit"
+        title="Checks every non-stale posting's stored URL for a real HTTP 404/410 -- can take a while across hundreds of postings.">
+        Check for dead links</button></form>"""
+    recent_jobs_link = f'<a class="btn btn--small btn--secondary" href="{url_for("jobs_index")}">Recent jobs</a>'
     score_batch_form = _score_batch_form_html(filters, total)
 
     if not all_rows:
         body = f"""<div class="dash-wrap">
-  <div class="detail-header"><h1>Postings</h1>{run_scout_form}</div>
+  <div class="detail-header"><h1>Postings</h1>{run_scout_form}{dead_link_form}{recent_jobs_link}</div>
   {filter_bar}
   <div class="empty-state">No postings yet — click Run Scout above, or {add_manual_link}.</div>
 </div>"""
@@ -656,7 +746,7 @@ def index():
         pagination_html = f'<div class="pagination">{"".join(links)}</div>'
 
     body = f"""<div class="dash-wrap">
-  <div class="detail-header"><h1>Postings</h1>{run_scout_form}
+  <div class="detail-header"><h1>Postings</h1>{run_scout_form}{dead_link_form}{recent_jobs_link}
     <p class="sub">{total} posting(s) match &middot; {len(all_rows)} total (excluding stale) &middot; {add_manual_link}</p></div>
   {filter_bar}
   {score_batch_form}
@@ -679,7 +769,14 @@ def posting_detail(posting_id):
   <h1>{_esc(posting['title'])}</h1>
   <p class="sub">{_esc(posting['company'])} &middot; {_esc(posting['location'] or 'Location n/a')}
   &middot; <a href="{_esc(posting['url'])}" target="_blank">original posting</a></p>
-</div>"""
+</div>
+<form method="post" action="{url_for('mark_stale_route')}" class="inline-form" style="margin-top:8px;">
+  <input type="hidden" name="posting_id" value="{posting_id}">
+  <input type="hidden" name="redirect_to" value="{url_for('index')}">
+  <button class="btn btn--secondary btn--small" type="submit"
+    title="If the 'original posting' link above is dead, mark this posting stale so it drops out of the normal list.">
+    Mark as stale (link is dead)</button>
+</form>"""
 
     if not posting["description"]:
         jd_form = f"""<form method="post" action="{url_for('generate', posting_id=posting_id)}">
@@ -802,6 +899,142 @@ def score_batch_route():
     return redirect(url_for("job_status_page", job_id=job_id))
 
 
+@app.route("/postings/check-dead-links", methods=["POST"])
+def check_dead_links_route():
+    """Scans EVERY non-stale posting in the DB (not just the current
+    filter view -- the whole-database sweep the person asked for
+    separately from the per-posting 'mark as stale' button), checking
+    each stored URL for a real HTTP 404/410. Same job-thread mechanism
+    as Scout/score-batch, not a new pattern."""
+    conn = get_connection()
+    init_schema(conn)
+    rows = conn.execute(
+        """SELECT postings.id, companies.name, postings.title, postings.url
+           FROM postings JOIN companies ON postings.company_id = companies.id
+           WHERE postings.status != 'stale'
+           ORDER BY companies.name, postings.title"""
+    ).fetchall()
+
+    job_id = uuid.uuid4().hex[:12]
+    _set_job(job_id, status="queued", kind="dead_link_check", total=len(rows), checked=0, dead=[], uncertain=[])
+    thread = threading.Thread(target=_run_dead_link_check_job, args=(job_id, rows), daemon=True)
+    thread.start()
+    return redirect(url_for("job_status_page", job_id=job_id))
+
+
+@app.route("/postings/dead-links/<job_id>")
+def dead_links_results(job_id):
+    """Results page for a finished check-dead-links job. Two tabs, plain
+    show/hide via a few lines of inline JS (no new dependency, matches
+    this file's existing convention of server-rendered HTML + a small
+    inline <script>, same as job_status_page):
+      - 'Dead' -- confident 404/410 (or, for Workday postings, an empty
+        jobPostingInfo -- see _check_workday_url_alive()) hits. Each has
+        a checkbox (checked by default) and submits to mark_stale_route.
+      - 'Inconclusive' -- everything check_url_alive() couldn't confirm
+        either way (network errors, robots.txt blocks, non-404/410
+        status codes). Read-only, no checkbox, no action -- surfaced so
+        the 153/947 (16%) inconclusive rate from this feature's first
+        real run isn't an invisible number with no detail behind it,
+        NOT because these are safe to bulk-mark-stale; see
+        check_url_alive()'s docstring for why that distinction matters.
+    """
+    job = _get_job(job_id)
+    if job is None or job.get("kind") != "dead_link_check":
+        abort(404)
+    if job.get("status") != "done":
+        return redirect(url_for("job_status_page", job_id=job_id))
+
+    dead = job.get("dead", [])
+    uncertain = job.get("uncertain", [])
+
+    # Per-company breakdown, added after a real session where counting by
+    # hand across a browser-history page turned out imprecise (23 vs 24,
+    # etc.) -- Counter over the dead list, not a separate query, since
+    # 'dead' already has every entry's company name sitting in memory.
+    company_counts = collections.Counter(d["company"] for d in dead)
+    company_breakdown_html = "".join(
+        f'<div class="card__meta">{_esc(company)}: {count}</div>'
+        for company, count in sorted(company_counts.items(), key=lambda kv: -kv[1])
+    ) or '<div class="card__meta">(none)</div>'
+
+    def _entry_card(d: dict, with_checkbox: bool) -> str:
+        checkbox_html = (
+            f'<div class="checkbox-field"><input type="checkbox" name="posting_id" value="{d["id"]}" checked></div>'
+            if with_checkbox else ""
+        )
+        return f"""<div class="card">
+  {checkbox_html}
+  <div>
+    <div class="card__company">{_esc(d['company'])}</div>
+    <h3 class="card__title">{_esc(d['title'])}</h3>
+    <div class="card__meta">{_esc(d['detail'])} &middot; <a href="{_esc(d['url'])}" target="_blank">original posting</a></div>
+  </div>
+</div>"""
+
+    dead_html = "".join(_entry_card(d, with_checkbox=True) for d in dead) or \
+        '<div class="empty-state">No confident dead links.</div>'
+    uncertain_html = "".join(_entry_card(d, with_checkbox=False) for d in uncertain) or \
+        '<div class="empty-state">Nothing inconclusive.</div>'
+
+    dead_tab_body = f"""<form method="post" action="{url_for('mark_stale_route')}">
+    <input type="hidden" name="redirect_to" value="{url_for('dead_links_results', job_id=job_id)}">
+    <p class="sub">Uncheck any you don't want marked, then confirm -- nothing is written until you submit.</p>
+    <div class="card" style="margin-bottom:12px;"><div class="card__company">By company</div>{company_breakdown_html}</div>
+    <div class="grid">{dead_html}</div>
+    {f'''<div class="btn-row" style="margin-top:16px;">
+      <button class="btn" type="submit">Mark checked posting(s) as stale</button>
+    </div>''' if dead else ""}
+  </form>""" if dead else f'<div class="grid">{dead_html}</div>'
+
+    body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Dead link check</h1></div>
+  <p class="sub">Checked {job.get('checked', 0)} posting(s) &middot; {len(dead)} confident dead link(s)
+  &middot; {len(uncertain)} inconclusive.</p>
+  <div class="tab-row" style="margin-bottom:12px;">
+    <button class="btn btn--small" id="tab-btn-dead" onclick="showTab('dead')">Dead ({len(dead)})</button>
+    <button class="btn btn--small btn--secondary" id="tab-btn-uncertain" onclick="showTab('uncertain')">Inconclusive ({len(uncertain)})</button>
+  </div>
+  <div id="tab-dead">{dead_tab_body}</div>
+  <div id="tab-uncertain" style="display:none;">
+    <p class="sub">Not treated as dead -- network errors, robots.txt blocks, or a status code that doesn't confidently mean "gone" (see check_url_alive() for the reasoning). No action available here on purpose.</p>
+    <div class="grid">{uncertain_html}</div>
+  </div>
+  <p class="sub" style="margin-top:16px;"><a class="btn btn--secondary btn--small" href="{url_for('index')}">Back to postings</a></p>
+</div>
+<script>
+function showTab(name) {{
+  document.getElementById('tab-dead').style.display = name === 'dead' ? '' : 'none';
+  document.getElementById('tab-uncertain').style.display = name === 'uncertain' ? '' : 'none';
+  document.getElementById('tab-btn-dead').className = name === 'dead' ? 'btn btn--small' : 'btn btn--small btn--secondary';
+  document.getElementById('tab-btn-uncertain').className = name === 'uncertain' ? 'btn btn--small' : 'btn btn--small btn--secondary';
+}}
+</script>"""
+    return _page("Dead link check", body)
+
+
+@app.route("/postings/mark-stale", methods=["POST"])
+def mark_stale_route():
+    """The only route that actually writes status='stale' from this
+    feature -- called either from dead_links_results()'s bulk-confirm
+    form (posting_id appears once per checked box) or from the
+    single-posting 'Mark as stale' button on posting_detail() (a lone
+    posting_id). Never called automatically -- see _run_dead_link_check_job's
+    docstring for why a detected dead link is a candidate, not a write,
+    until a person submits this form."""
+    posting_ids = [int(pid) for pid in request.form.getlist("posting_id")]
+    if posting_ids:
+        conn = get_connection()
+        init_schema(conn)
+        conn.executemany(
+            "UPDATE postings SET status = 'stale' WHERE id = ?",
+            [(pid,) for pid in posting_ids],
+        )
+        conn.commit()
+    redirect_to = request.form.get("redirect_to") or url_for("index")
+    return redirect(redirect_to)
+
+
 @app.route("/jobs/<job_id>")
 def job_status_page(job_id):
     job = _get_job(job_id)
@@ -826,6 +1059,10 @@ async function poll() {{
       window.location = "/postings/" + j.posting_id;
       return;
     }}
+    if (j.kind === "dead_link_check") {{
+      window.location = "{url_for('dead_links_results', job_id=job_id)}";
+      return;
+    }}
     if (j.kind === "score_batch") {{
       el.textContent = "Done.";
       detailEl.textContent = `Scored ${{j.scored}}, skipped ${{j.skipped}}, of ${{j.total}} filtered posting(s).`;
@@ -848,11 +1085,17 @@ async function poll() {{
     setTimeout(poll, 2000);
   }} else if (j.kind === "scout") {{
     el.textContent = j.status === "running" ? "Running Scout\\u2026" : "Queued\\u2026";
-    const ofTotal = j.total_companies ? ` of ${{j.total_companies}}` : "";
-    detailEl.textContent = `Checked ${{j.companies_done || 0}}${{ofTotal}} companies` +
-      (j.current_company ? ` \\u2014 last: ${{j.current_company}}` : "") +
-      ` \\u2014 ${{j.new_postings_so_far || 0}} new posting(s) so far.`;
-    setTimeout(poll, 1500);
+    detailEl.textContent = j.total_companies
+      ? `${{j.companies_done || 0}} of ${{j.total_companies}} companies checked` +
+        (j.current_company ? ` \\u2014 last: ${{j.current_company}}` : "")
+      : "Checking company career pages\\u2026";
+    setTimeout(poll, 2500);
+  }} else if (j.kind === "dead_link_check") {{
+    el.textContent = j.status === "running" ? "Checking posting links\\u2026" : "Queued\\u2026";
+    detailEl.textContent = `${{j.checked || 0}} of ${{j.total}} posting(s) checked` +
+      (j.dead && j.dead.length ? `, ${{j.dead.length}} dead link(s) found so far` : "") +
+      (j.current ? ` \\u2014 currently: ${{j.current}}` : "");
+    setTimeout(poll, 2000);
   }} else {{
     el.textContent = j.status === "running" ? "Running Writer \\u2192 Critic \\u2192 Revision\\u2026 (a few minutes on local models)" : "Queued\\u2026";
     setTimeout(poll, 2500);

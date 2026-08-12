@@ -309,14 +309,14 @@ def parse_score(critique_text: str) -> ScoreResult:
 # SAME background-job mechanism Generate already uses (_jobs/_set_job/
 # _get_job, a daemon thread, /jobs/<job_id>.json polling) rather than a
 # second mechanism -- the job dict now carries a "kind" field
-# ("generate" | "score_batch" | "scout") so job_status_page's polling JS
-# can show the right progress shape for each. score_batch's total is an
-# exact filtered-posting count, known upfront. scout's per-company
-# progress uses run_scout()'s on_company_done callback (added to
-# detector.py the same day this dashboard integration was built,
-# specifically to close this gap -- confirmed working in a real browser
-# run, not just wired blind). "Score these N filtered postings" runs
-# Scorer over EXACTLY the postings-index's current filter set (same
+# ("generate" | "score_batch" | "scout" | "dead_link_check") so job_status_page's polling JS
+# can show the right progress shape for each. Scout's "N of M companies
+# checked" progress (added once detector.py's run_scout() was actually
+# seen and confirmed to accept an on_company_done callback) uses the same
+# real-count approach score_batch already established -- not a fabricated
+# bar, an actual per-company count driven by run_scout()'s own callback.
+# "Score these N filtered postings" runs Scorer
+# over EXACTLY the postings-index's current filter set (same
 # keyword_filter_match() call the cards already render from, via a shared
 # _filtered_postings() helper extracted from index() for this) -- not a
 # second, separate filter UI, per the 2026-08-10 handoff's explicit
@@ -332,6 +332,10 @@ def _set_job(job_id: str) -> None:
 def _get_job(job_id: str) -> dict | None:
     ...
 
+def jobs_index():
+    """Lists every job this dashboard process has run since it started --"""
+    ...
+
 def _run_generation(job_id: str, posting_id: int, company_name: str, job_title: str, job_description: str, revision_rounds: int, think: bool) -> None:
     """Runs in a background thread, started by POST /postings/<id>/generate."""
     ...
@@ -342,6 +346,10 @@ def _run_score_batch(job_id: str, posting_rows: list[tuple], rescore: bool, thin
 
 def _run_scout_job(job_id: str) -> None:
     """Runs in a background thread, started by POST /scout/run. Calls"""
+    ...
+
+def _run_dead_link_check_job(job_id: str, posting_rows: list[tuple]) -> None:
+    """Runs in a background thread, started by POST /postings/check-dead-links."""
     ...
 
 def _get_posting(conn, posting_id: int) -> dict | None:
@@ -398,6 +406,18 @@ def run_scout_route():
 
 def score_batch_route():
     """2026-08-10: dashboard-triggered Scorer over the CURRENT filter set"""
+    ...
+
+def check_dead_links_route():
+    """Scans EVERY non-stale posting in the DB (not just the current"""
+    ...
+
+def dead_links_results(job_id):
+    """Results page for a finished check-dead-links job. Two tabs, plain"""
+    ...
+
+def mark_stale_route():
+    """The only route that actually writes status='stale' from this"""
     ...
 
 def job_status_page(job_id):
@@ -1002,6 +1022,14 @@ def extract_postings(html: str, css_selector: str, base_url: str) -> list[RawPos
 
 def check_for_change(html: str, previous_hash: str | None) -> tuple[bool, str]:
     """Returns (changed, new_hash). If css_selector-based extraction later"""
+    ...
+
+def _check_workday_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | None, str]:
+    """Workday-specific existence check, dispatched to by check_url_alive()"""
+    ...
+
+def _check_jobvite_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | None, str]:
+    """Jobvite-specific existence check, dispatched to by check_url_alive()"""
     ...
 
 def check_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | None, str]:
