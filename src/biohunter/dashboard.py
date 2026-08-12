@@ -948,6 +948,38 @@ def dead_links_results(job_id):
     dead = job.get("dead", [])
     uncertain = job.get("uncertain", [])
 
+    # Re-check CURRENT status against the DB, not just what the sweep saw
+    # -- added after a real session where submitting the mark-stale form
+    # redirected back here looking IDENTICAL to before submitting (this
+    # page was rendering the job's in-memory snapshot from before the
+    # write, with no way to tell the write had happened). Entries already
+    # marked stale since this job ran show as done, not as if nothing
+    # happened.
+    already_stale_ids: set[int] = set()
+    if dead:
+        conn = get_connection()
+        init_schema(conn)
+        placeholders = ",".join("?" for _ in dead)
+        rows = conn.execute(
+            f"SELECT id FROM postings WHERE status = 'stale' AND id IN ({placeholders})",
+            [d["id"] for d in dead],
+        ).fetchall()
+        already_stale_ids = {r[0] for r in rows}
+
+    marked_param = request.args.get("marked")
+    banner_html = ""
+    if marked_param is not None:
+        try:
+            marked_n = int(marked_param)
+        except ValueError:
+            marked_n = 0
+        banner_html = (
+            f'<div class="empty-state" style="margin-bottom:12px;">'
+            f'Marked {marked_n} posting(s) as stale. '
+            f'{len(already_stale_ids)} of {len(dead)} listed below are now confirmed stale in the database.</div>'
+            if marked_n else ""
+        )
+
     # Per-company breakdown, added after a real session where counting by
     # hand across a browser-history page turned out imprecise (23 vs 24,
     # etc.) -- Counter over the dead list, not a separate query, since
@@ -959,10 +991,13 @@ def dead_links_results(job_id):
     ) or '<div class="card__meta">(none)</div>'
 
     def _entry_card(d: dict, with_checkbox: bool) -> str:
-        checkbox_html = (
-            f'<div class="checkbox-field"><input type="checkbox" name="posting_id" value="{d["id"]}" checked></div>'
-            if with_checkbox else ""
-        )
+        is_done = d["id"] in already_stale_ids
+        if is_done:
+            checkbox_html = '<div class="card__meta" style="font-weight:600;">&#10003; Marked stale</div>'
+        elif with_checkbox:
+            checkbox_html = f'<div class="checkbox-field"><input type="checkbox" name="posting_id" value="{d["id"]}" checked></div>'
+        else:
+            checkbox_html = ""
         return f"""<div class="card">
   {checkbox_html}
   <div>
@@ -989,6 +1024,7 @@ def dead_links_results(job_id):
 
     body = f"""<div class="dash-wrap">
   <div class="detail-header"><h1>Dead link check</h1></div>
+  {banner_html}
   <p class="sub">Checked {job.get('checked', 0)} posting(s) &middot; {len(dead)} confident dead link(s)
   &middot; {len(uncertain)} inconclusive.</p>
   <div class="tab-row" style="margin-bottom:12px;">
@@ -1021,8 +1057,19 @@ def mark_stale_route():
     single-posting 'Mark as stale' button on posting_detail() (a lone
     posting_id). Never called automatically -- see _run_dead_link_check_job's
     docstring for why a detected dead link is a candidate, not a write,
-    until a person submits this form."""
+    until a person submits this form.
+
+    Appends ?marked=<count> onto the redirect -- added after a real
+    session where submitting this form redirected back to
+    dead_links_results() with NO visible change (that page re-renders
+    from the job's in-memory snapshot taken BEFORE this write, so it
+    looked identical whether the write succeeded or silently failed).
+    dead_links_results() reads this param to show an explicit
+    confirmation banner instead of leaving the person to go check the
+    DB by hand to find out.
+    """
     posting_ids = [int(pid) for pid in request.form.getlist("posting_id")]
+    marked_count = 0
     if posting_ids:
         conn = get_connection()
         init_schema(conn)
@@ -1031,8 +1078,10 @@ def mark_stale_route():
             [(pid,) for pid in posting_ids],
         )
         conn.commit()
+        marked_count = len(posting_ids)
     redirect_to = request.form.get("redirect_to") or url_for("index")
-    return redirect(redirect_to)
+    separator = "&" if "?" in redirect_to else "?"
+    return redirect(f"{redirect_to}{separator}marked={marked_count}")
 
 
 @app.route("/jobs/<job_id>")
