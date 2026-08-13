@@ -35,7 +35,8 @@
 │   │   ├── 2026-08-10_3_BioHunter-4b-BrowserConfirmed-ScoutProgress-Handoff.md
 │   │   ├── 2026-08-10_4_BioHunter-ScoutProgressConfirmedLive-Handoff.md
 │   │   ├── 2026-08-11_2_BioHunter-DeadLinkChecker-403Fix-CompanyBreakdown-Handoff.md
-│   │   └── 2026-08-11_BioHunter-DeadLinkChecker-ATSNuances-Handoff.md
+│   │   ├── 2026-08-11_BioHunter-DeadLinkChecker-ATSNuances-Handoff.md
+│   │   └── 2026-08-13_BioHunter-GreenhouseFixConfirmed-RepostTracking-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md

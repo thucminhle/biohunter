@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import requests
 
 from .base import ATSAdapter, RawPosting
@@ -7,6 +9,8 @@ from .base import ATSAdapter, RawPosting
 _USER_AGENT = "BioHunter/0.1 (personal job-search tool; contact: set-your-email-here)"
 _SEARCH_URL = "https://prod-search-api.jobsyn.org/api/v1/solr/search"
 _PAGE_SIZE = 50
+
+logger = logging.getLogger(__name__)
 
 
 class JobsynAdapter(ATSAdapter):
@@ -81,6 +85,29 @@ class JobsynAdapter(ATSAdapter):
             # Missing a piece needed to build the exact URL (happens for
             # some international postings without location_exact) --
             # fall back to the careers site root rather than guess wrong.
+            #
+            # NEW: log which piece was missing and for which job. This
+            # doesn't fix the construction problem (that needs real
+            # sample data from a browser Network tab -- astellascareers.jobs
+            # is client-rendered and its search API isn't otherwise
+            # reachable, see conversation notes) but it makes the failure
+            # visible instead of silent, same fail-soft-but-loud spirit
+            # as workday.py's own detail-fetch warning. scraper.py's
+            # check_url_alive() now also flags any URL with path exactly
+            # "/jobs/" as inconclusive rather than always-"alive", so
+            # this warning is the thing that tells you WHY a given
+            # posting ended up with that meaningless URL.
+            missing = [name for name, val in (
+                ("location_exact/city_exact", location),
+                ("title_slug", title_slug),
+                ("guid", guid),
+            ) if not val]
+            logger.warning(
+                "[jobsyn] falling back to bare careers-root URL for %r -- "
+                "missing %s in the API response. This posting's URL won't "
+                "point at its own detail page.",
+                title or guid, missing,
+            )
             url = f"{origin}/jobs/"
 
         return RawPosting(title=title, url=url, location=location, description=job.get("description"))

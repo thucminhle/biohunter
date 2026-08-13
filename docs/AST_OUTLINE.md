@@ -56,6 +56,7 @@ class GreenhouseAdapter(ATSAdapter):
 _USER_AGENT = 'BioHunter/0.1 (personal job-search tool; contact: set-your-email-here)'
 _SEARCH_URL = 'https://prod-search-api.jobsyn.org/api/v1/solr/search'
 _PAGE_SIZE = 50
+logger = logging.getLogger(__name__)
 class JobsynAdapter(ATSAdapter):
     """DirectEmployers' National Labor Exchange (jobsyn.org) backend --"""
     name = 'jobsyn'
@@ -1030,6 +1031,10 @@ def _check_workday_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | Non
 
 def _check_jobvite_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | None, str]:
     """Jobvite-specific existence check, dispatched to by check_url_alive()"""
+    ...
+
+def _check_greenhouse_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | None, str]:
+    """Greenhouse-specific existence check, dispatched to by check_url_alive()"""
     ...
 
 def check_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | None, str]:

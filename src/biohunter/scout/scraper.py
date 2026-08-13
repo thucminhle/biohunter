@@ -194,6 +194,61 @@ def _check_jobvite_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | Non
     return True, "HTTP 200, job detail page still resolves"
 
 
+def _check_greenhouse_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | None, str]:
+    """Greenhouse-specific existence check, dispatched to by check_url_alive()
+    for any boards.greenhouse.io or job-boards.greenhouse.io URL.
+
+    WHY THIS EXISTS: a dead Greenhouse posting does NOT 404 on its own
+    detail URL -- confirmed directly against two real, no-longer-listed
+    Nurix postings. Both returned HTTP 200 but redirected (final URL,
+    not the requested one) to the board's root listing page with an
+    `error=true` query param: job-boards.greenhouse.io/nurix?error=true.
+    A real, currently-live Nurix posting fetched the same way resolved
+    at its own URL with no redirect -- confirmed opposite-direction,
+    same spirit as the Workday 403 check. Status-code-only checking
+    (this repo's generic path) reads the redirect's 200 and calls it
+    alive; that's the root cause of Nurix/Scribe showing zero dead
+    links in the first full sweep despite Nurix being a real, active
+    board with normal job turnover.
+
+    Does NOT skip robots.txt the way _check_jobvite_url_alive() does --
+    unlike Jobvite, greenhouse.py's own adapter fetches a DIFFERENT host
+    (boards-api.greenhouse.io, the JSON API) than the one stored/checked
+    here (boards.greenhouse.io / job-boards.greenhouse.io, the public
+    page) -- so there's no "the adapter already treats this URL as fair
+    game" precedent to lean on. Same host-mismatch caution the prior
+    handoff named for Lever/Ashby.
+
+    CONFIDENCE CAVEAT: confirmed against two real Nurix postings only,
+    one company, one session. Not yet checked against a second
+    Greenhouse-hosted company (Scribe Therapeutics's whole board is
+    currently down entirely, so it can't serve as a second data point
+    right now). Downgrade this branch to return None (inconclusive)
+    rather than False if a future sweep's spot-checks don't confirm the
+    same pattern elsewhere.
+    """
+    limiter.wait_for_domain(url)
+    if not limiter.allowed_by_robots(url):
+        return None, "robots.txt disallows checking this URL"
+    try:
+        resp = requests.get(
+            url, headers={"User-Agent": _USER_AGENT}, timeout=15, allow_redirects=True,
+        )
+    except requests.RequestException as exc:
+        return None, f"Greenhouse request failed: {exc}"
+
+    if resp.status_code in (404, 410):
+        return False, f"HTTP {resp.status_code}"
+    if resp.status_code != 200:
+        return None, f"HTTP {resp.status_code} from Greenhouse (inconclusive, not treated as dead)"
+
+    final_query = urllib.parse.urlparse(resp.url).query
+    if "error=true" in final_query:
+        return False, (f"Redirected to Greenhouse's board-root 'listing not found' "
+                        f"page (final URL: {resp.url})")
+    return True, "HTTP 200, job detail page still resolves"
+
+
 def check_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | None, str]:
     """Checks whether a stored posting URL still resolves to a real
     listing, for the dashboard's dead-link sweep -- the "I clicked
@@ -234,17 +289,39 @@ def check_url_alive(url: str, limiter: RateLimiter) -> tuple[bool | None, str]:
     existing politeness rules.
 
     DISPATCHES to _check_workday_url_alive() for any *.myworkdayjobs.com
-    URL, and to _check_jobvite_url_alive() for any jobs.jobvite.com URL --
-    see each function's own docstring for why: both platforms' own real
-    Scout adapters fetch these exact URLs without a robots.txt check, and
-    each has its own non-404 dead-posting signature the generic
-    status-code logic below can't see.
+    URL, to _check_jobvite_url_alive() for any jobs.jobvite.com URL, and
+    to _check_greenhouse_url_alive() for any boards.greenhouse.io /
+    job-boards.greenhouse.io URL -- see each function's own docstring for
+    why: each platform's dead-posting signature is a non-404 signal the
+    generic status-code logic below can't see on its own.
+
+    Also treats any URL whose path is exactly "/jobs/" as inconclusive
+    rather than running the generic check at all. This is jobsyn.py's
+    OWN documented fallback: _to_raw_posting() constructs this bare
+    {origin}/jobs/ URL whenever it can't build a real per-job URL
+    (missing location_exact/title_slug/guid in the API response) -- see
+    that function's own warning log for which postings this affects.
+    That fallback URL is really just the careers-site root, which always
+    resolves HTTP 200 regardless of the real posting's status. Running
+    the generic 200-means-alive logic against it would always say
+    "alive," which isn't a check of anything -- it's a guaranteed false
+    positive. Caught here, before dispatch, rather than inside a
+    Jobsyn-specific checker function, since there's no real per-posting
+    signal to check in this case at all -- the URL itself carries no
+    posting-specific information.
     """
-    parsed_netloc = urllib.parse.urlparse(url).netloc
+    parsed = urllib.parse.urlparse(url)
+    parsed_netloc = parsed.netloc
     if parsed_netloc.endswith("myworkdayjobs.com"):
         return _check_workday_url_alive(url, limiter)
     if parsed_netloc == "jobs.jobvite.com":
         return _check_jobvite_url_alive(url, limiter)
+    if parsed_netloc in ("boards.greenhouse.io", "job-boards.greenhouse.io"):
+        return _check_greenhouse_url_alive(url, limiter)
+    if parsed.path == "/jobs/":
+        return None, ("URL is jobsyn's generic fallback root, not a real "
+                       "per-posting URL (see jobsyn.py's _to_raw_posting) -- "
+                       "cannot confirm alive/dead")
 
     if not limiter.allowed_by_robots(url):
         return None, "robots.txt disallows checking this URL"

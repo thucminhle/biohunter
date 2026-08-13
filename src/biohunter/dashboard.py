@@ -962,7 +962,7 @@ def dead_links_results(job_id):
         placeholders = ",".join("?" for _ in dead)
         rows = conn.execute(
             f"SELECT id FROM postings WHERE status = 'stale' AND id IN ({placeholders})",
-            [d["id"] for d in dead],
+            tuple(d["id"] for d in dead),
         ).fetchall()
         already_stale_ids = {r[0] for r in rows}
 
