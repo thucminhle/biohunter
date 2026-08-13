@@ -113,6 +113,12 @@ def _upsert_postings(conn, company_id: int, postings: list[RawPosting]) -> int:
     content for it -- there's no "manually edited, don't touch" flag on
     the row. Not built here; flagging it as a real, known interaction
     rather than a silent surprise.
+
+    ADDED 2026-08-13: a genuinely new (company_id, url) posting now also
+    triggers _link_repost_if_exact_match() right after insert, to catch
+    reposts that get a new URL from the ATS (the normal case) rather
+    than the old row just being refreshed. See that function's own
+    docstring for the exact-title-only, skip-on-ambiguity matching rule.
     """
     new_count = 0
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -133,8 +139,84 @@ def _upsert_postings(conn, company_id: int, postings: list[RawPosting]) -> int:
                 (company_id, p.title, p.url, p.location, description),
             )
             new_count += 1
+            _link_repost_if_exact_match(conn, company_id, p.title, p.url)
     conn.commit()
     return new_count
+
+
+def _normalize_title(title: str) -> str:
+    """Lowercase + collapse whitespace, for exact-repost title matching.
+    Deliberately not more aggressive than this -- no punctuation
+    stripping, no stemming -- see _link_repost_if_exact_match()'s
+    docstring for why a cheap, conservative match was chosen over fuzzy
+    matching for this first pass."""
+    return " ".join(title.split()).lower()
+
+
+def _link_repost_if_exact_match(conn, company_id: int, title: str, url: str) -> None:
+    """Called right after inserting a brand-new posting (i.e. one whose
+    (company_id, url) didn't already exist). If EXACTLY ONE stale
+    posting at this company shares the same normalized title, treat the
+    new posting as a repost of it: set reposted_from_id, record how the
+    match was made, and compute turnaround time from the old row's
+    stale_at to the new row's first_seen_at.
+
+    Deliberately conservative on ambiguity: if a company has more than
+    one stale posting with that exact title (e.g. a recurring req like
+    "Research Associate" reused across teams), this SKIPS linking
+    entirely rather than guessing -- a wrong link would silently
+    corrupt repost_turnaround_days, whereas skipping just leaves
+    reposted_from_id NULL, indistinguishable from an ordinary new
+    posting. This was an explicit call made with the user rather than
+    an assumption: 'most recent stale match' and 'oldest stale match'
+    were both considered and rejected in favor of skip-on-ambiguity.
+
+    Only exact-title matching is implemented (repost_match_type =
+    'exact_title', repost_similarity = 1.0 always, for now) -- fuzzy
+    title/description similarity is a documented stretch goal in
+    schema.sql's own column comments, not built here.
+
+    The old row's stale_at can be NULL for rows marked stale before
+    this feature existed -- the link is still recorded in that case,
+    just without a turnaround number, so historical data isn't silently
+    dropped.
+    """
+    stale_rows = conn.execute(
+        "SELECT id, title, stale_at FROM postings WHERE company_id = ? AND status = 'stale'",
+        (company_id,),
+    ).fetchall()
+    normalized_target = _normalize_title(title)
+    matches = [r for r in stale_rows if _normalize_title(r[1]) == normalized_target]
+    if len(matches) != 1:
+        return  # zero matches, or ambiguous (2+) -- skip either way, see docstring
+
+    old_id, _old_title, old_stale_at = matches[0]
+    new_row = conn.execute(
+        "SELECT id FROM postings WHERE company_id = ? AND url = ?", (company_id, url)
+    ).fetchone()
+    if new_row is None:
+        return  # shouldn't happen -- we just inserted it -- but never break Scout over this
+    new_id = new_row[0]
+
+    if old_stale_at:
+        conn.execute(
+            """UPDATE postings
+               SET reposted_from_id = ?,
+                   repost_match_type = 'exact_title',
+                   repost_similarity = 1.0,
+                   repost_turnaround_days = julianday(first_seen_at) - julianday(?)
+               WHERE id = ?""",
+            (old_id, old_stale_at, new_id),
+        )
+    else:
+        conn.execute(
+            """UPDATE postings
+               SET reposted_from_id = ?,
+                   repost_match_type = 'exact_title',
+                   repost_similarity = 1.0
+               WHERE id = ?""",
+            (old_id, new_id),
+        )
 
 
 def _mark_stale_postings(conn, company_id: int, run_time: datetime.datetime) -> int:
@@ -143,10 +225,21 @@ def _mark_stale_postings(conn, company_id: int, run_time: datetime.datetime) -> 
     already progressed (status 'applied' or 'rejected') -- staleness here
     means "no longer visible on the source", not a judgment on postings
     you've already acted on. Returns count of postings newly marked stale.
+
+    Also stamps stale_at (via COALESCE, so it's set exactly once, same
+    convention as dashboard.py's mark_stale_route -- the dashboard's
+    manual dead-link-confirm path and this automatic path are the only
+    two writers of status='stale', and both need to leave the same kind
+    of timestamp behind for repost_turnaround_days to mean anything
+    regardless of which path a given posting went stale through).
+    Uses SQL datetime('now'), not a Python-formatted timestamp, to match
+    first_seen_at's own DEFAULT (datetime('now')) in schema.sql -- both
+    need to be directly comparable via julianday() in
+    _link_repost_if_exact_match() without a format mismatch.
     """
     cutoff = (run_time - datetime.timedelta(days=STALE_AFTER_DAYS)).isoformat()
     cur = conn.execute(
-        """UPDATE postings SET status = 'stale'
+        """UPDATE postings SET status = 'stale', stale_at = COALESCE(stale_at, datetime('now'))
            WHERE company_id = ? AND status NOT IN ('applied', 'rejected', 'stale')
            AND last_seen_at < ?""",
         (company_id, cutoff),

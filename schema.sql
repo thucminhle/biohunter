@@ -33,6 +33,38 @@ CREATE TABLE IF NOT EXISTS postings (
                               -- instead (see that table's comment). Column existed since
                               -- Phase 1 -- as of 2026-08-09 something finally populates it.
     score_rationale  TEXT,
+    stale_at         TEXT,   -- ISO8601 timestamp of the moment status became 'stale'.
+                              -- Set once and never overwritten on re-marks (writers should
+                              -- use COALESCE(stale_at, datetime('now')) so re-running a
+                              -- stale-check job doesn't reset the clock). NULL for any
+                              -- posting that has never been stale. This is what repost
+                              -- turnaround time is measured FROM -- added 2026-08-13
+                              -- alongside repost tracking below, before which there was no
+                              -- record of when a posting went stale, only that it was.
+    reposted_from_id INTEGER REFERENCES postings(id),
+                              -- Set ONLY on a newly-inserted row that detector.py's repost
+                              -- matcher believes is the same role reappearing under a new
+                              -- URL. Points back at the OLD stale row. The old row is never
+                              -- mutated or revived (deliberate choice -- see
+                              -- 2026-08-13 handoff's design discussion: preserves history
+                              -- Critic/Writer output may already reference by id). NULL for
+                              -- every normal posting, including the old stale one itself.
+    repost_match_type TEXT,  -- How reposted_from_id was determined, e.g. 'exact_title'.
+                              -- Reserved values as matching strategies are added (fuzzy
+                              -- title, description similarity, manual). NULL unless
+                              -- reposted_from_id is set.
+    repost_similarity REAL,  -- 0.0-1.0 confidence that this is really the same role, not a
+                              -- different one that happens to share a title. 1.0 for an
+                              -- exact title match. Leaves room for a future fuzzy-match
+                              -- score without a schema change. NULL unless
+                              -- reposted_from_id is set.
+    repost_turnaround_days REAL,
+                              -- Denormalized julianday(this.first_seen_at) -
+                              -- julianday(old.stale_at), frozen at detection time -- same
+                              -- pattern as drafts.final_score being denormalized off
+                              -- result_json, so the dashboard can show/sort/filter on this
+                              -- without a join+computation on every page load. NULL unless
+                              -- reposted_from_id is set.
     UNIQUE(company_id, url)
 );
 
@@ -112,3 +144,4 @@ CREATE TABLE IF NOT EXISTS drafts (
 CREATE INDEX IF NOT EXISTS idx_postings_status ON postings(status);
 CREATE INDEX IF NOT EXISTS idx_postings_company ON postings(company_id);
 CREATE INDEX IF NOT EXISTS idx_drafts_posting ON drafts(posting_id);
+CREATE INDEX IF NOT EXISTS idx_postings_reposted_from ON postings(reposted_from_id);

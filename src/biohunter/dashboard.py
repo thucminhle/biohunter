@@ -1074,7 +1074,11 @@ def mark_stale_route():
         conn = get_connection()
         init_schema(conn)
         conn.executemany(
-            "UPDATE postings SET status = 'stale' WHERE id = ?",
+            # COALESCE so re-confirming an already-stale posting (e.g. it
+            # shows up in a later dead-link sweep before a repost lands)
+            # doesn't reset the clock repost-turnaround-time is measured
+            # from -- stale_at is meant to be set exactly once.
+            "UPDATE postings SET status = 'stale', stale_at = COALESCE(stale_at, datetime('now')) WHERE id = ?",
             [(pid,) for pid in posting_ids],
         )
         conn.commit()

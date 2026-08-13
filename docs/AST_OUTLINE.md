@@ -981,6 +981,14 @@ def _upsert_postings(conn, company_id: int, postings: list[RawPosting]) -> int:
     """Insert new postings, refresh last_seen_at on existing ones. Returns count of new postings."""
     ...
 
+def _normalize_title(title: str) -> str:
+    """Lowercase + collapse whitespace, for exact-repost title matching."""
+    ...
+
+def _link_repost_if_exact_match(conn, company_id: int, title: str, url: str) -> None:
+    """Called right after inserting a brand-new posting (i.e. one whose"""
+    ...
+
 def _mark_stale_postings(conn, company_id: int, run_time: datetime.datetime) -> int:
     """Mark postings not seen in this company's last STALE_AFTER_DAYS worth"""
     ...
