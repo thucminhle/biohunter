@@ -77,9 +77,9 @@ import logging
 import threading
 import uuid
 
-from flask import Flask, Response, abort, redirect, request, url_for
+from flask import Flask, Response, abort, jsonify, redirect, request, url_for
 
-from . import drafts_db
+from . import drafts_db, settings_db
 from .cli import DEFAULT_BAY_AREA_LOCATIONS, _log_run, keyword_filter_match
 from .config import load_companies, load_search_criteria
 from .critic import ScoreResult, parse_score
@@ -130,6 +130,47 @@ def _get_job(job_id: str) -> dict | None:
         return dict(job) if job is not None else None
 
 
+def _active_generate_job_for_posting(posting_id: int) -> dict | None:
+    """Returns the most recently started in-flight (queued/running)
+    'generate' job for this posting, or None. Used by posting_detail()
+    to show a live progress panel instead of the Generate button/form
+    while a run it already knows about is still going -- previously the
+    button just sat there unchanged with no indication anything was
+    happening (2026-08-13 feedback).
+
+    _jobs preserves insertion order (plain dict, Python 3.7+), so the
+    LAST matching entry is the most recently started one -- relevant
+    only if two jobs somehow got started for the same posting (not
+    reachable via this UI, since the form disappears once one is
+    detected, but a second browser tab or a race could still do it)."""
+    with _jobs_lock:
+        matches = [
+            {"job_id": jid, **j} for jid, j in _jobs.items()
+            if j.get("kind") == "generate" and j.get("posting_id") == posting_id
+            and j.get("status") in ("queued", "running")
+        ]
+    return matches[-1] if matches else None
+
+
+@app.route("/jobs/active.json")
+def jobs_active_json():
+    """Powers the topbar's ambient job poller (see _page()'s <script>
+    block) -- lets a generation keep running and notify you when it's
+    done even if you've navigated to a completely different page,
+    as long as some BioHunter tab is still open somewhere (no server
+    push here, this is plain polling -- it cannot notify you if the
+    browser itself is fully closed; see the module docstring's existing
+    "in-flight work is lost on a process restart" note for the same
+    kind of limitation, one level up).
+
+    Returns every 'generate' job this process has seen, not just
+    in-flight ones -- the client needs to see the done/error transition
+    at least once to fire a notification, not just the running state."""
+    with _jobs_lock:
+        items = [{"job_id": jid, **j} for jid, j in _jobs.items() if j.get("kind") == "generate"]
+    return jsonify(items)
+
+
 @app.route("/jobs")
 def jobs_index():
     """Lists every job this dashboard process has run since it started --
@@ -175,12 +216,34 @@ def _run_generation(
     job_description: str,
     revision_rounds: int,
     think: bool,
+    stability: str,
 ) -> None:
     """Runs in a background thread, started by POST /postings/<id>/generate.
     Opens its own DB connection rather than sharing the request's --
     libsql connections aren't guaranteed thread-safe to share across
-    threads, and this thread outlives the request that started it."""
-    _set_job(job_id, status="running", posting_id=posting_id, kind="generate")
+    threads, and this thread outlives the request that started it.
+
+    Progress: total_steps is computed deterministically up front (10
+    units of work per round -- see run_revision_loop()'s on_step
+    docstring -- times revision_rounds+1 rounds), then on_step() ticks
+    `step` up by one and records a human label in `current` as each unit
+    finishes. This is a REAL count against real completed work, not a
+    time-based animation -- same "actual per-unit count, not a
+    fabricated bar" approach _run_score_batch()/run_scout()'s progress
+    already use in this file.
+    """
+    total_steps = 10 * (revision_rounds + 1)
+    step_state = {"n": 0}
+
+    def on_step(label: str) -> None:
+        step_state["n"] += 1
+        _set_job(job_id, step=step_state["n"], total_steps=total_steps, current=label)
+
+    _set_job(
+        job_id, status="running", posting_id=posting_id, kind="generate",
+        company_name=company_name, job_title=job_title,
+        step=0, total_steps=total_steps, current="starting…",
+    )
     try:
         client = LLMClient()
         result = run_revision_loop(
@@ -190,6 +253,8 @@ def _run_generation(
             job_description=job_description,
             revision_rounds=revision_rounds,
             think=think,
+            stability=stability,
+            on_step=on_step,
         )
         conn = get_connection()
         init_schema(conn)
@@ -500,8 +565,92 @@ def _page(title: str, body: str) -> str:
 <style>{_REPORT_STYLE}{_DASHBOARD_STYLE}</style>
 </head>
 <body>
-<div class="topbar"><div class="topbar__wrap"><a href="{url_for('index')}">BioHunter</a></div></div>
+<div class="topbar"><div class="topbar__wrap">
+  <a href="{url_for('index')}">BioHunter</a>
+  <span id="job-indicator" style="float:right;font-size:13px;color:var(--ink-faint);"></span>
+  <a id="notif-enable" href="#" style="float:right;font-weight:500;font-size:13px;margin-right:14px;display:none;">Enable notifications</a>
+  <a href="{url_for('settings_page')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Settings</a>
+</div></div>
 {body}
+<script>
+// Ambient job poller -- runs on EVERY dashboard page (this is the shared
+// page shell), so a generation started from one posting still gets
+// surfaced -- as a live topbar indicator while running, and a browser
+// notification on completion -- no matter which page you've since
+// navigated to. Only works while some BioHunter tab is open somewhere
+// (plain polling, no server push -- see /jobs/active.json's docstring).
+(function() {{
+  const notifEnableLink = document.getElementById("notif-enable");
+  const indicator = document.getElementById("job-indicator");
+
+  function notifiedSet() {{
+    try {{ return new Set(JSON.parse(localStorage.getItem("biohunter_notified_jobs") || "[]")); }}
+    catch (e) {{ return new Set(); }}
+  }}
+  function markNotified(jobId) {{
+    const s = notifiedSet(); s.add(jobId);
+    // Cap stored size -- this is just dedup memory, not a real record.
+    const arr = Array.from(s).slice(-200);
+    localStorage.setItem("biohunter_notified_jobs", JSON.stringify(arr));
+  }}
+
+  if (window.Notification && Notification.permission === "default") {{
+    notifEnableLink.style.display = "inline";
+    notifEnableLink.onclick = function(e) {{
+      e.preventDefault();
+      Notification.requestPermission().then(function() {{
+        notifEnableLink.style.display = "none";
+      }});
+    }};
+  }}
+
+  async function poll() {{
+    let jobs;
+    try {{
+      const r = await fetch("/jobs/active.json");
+      jobs = await r.json();
+    }} catch (e) {{
+      setTimeout(poll, 5000);
+      return;
+    }}
+
+    const seen = notifiedSet();
+    const running = jobs.filter(j => j.status === "running" || j.status === "queued");
+
+    for (const j of jobs) {{
+      if ((j.status === "done" || j.status === "error") && !seen.has(j.job_id)) {{
+        markNotified(j.job_id);
+        const label = (j.company_name || "Posting") + (j.job_title ? " \\u2014 " + j.job_title : "");
+        if (window.Notification && Notification.permission === "granted") {{
+          const n = new Notification(
+            j.status === "done" ? "Resume ready" : "Generation failed",
+            {{ body: label, tag: "biohunter-" + j.job_id }}
+          );
+          n.onclick = function() {{
+            window.focus();
+            if (j.posting_id) window.location = "/postings/" + j.posting_id;
+          }};
+        }}
+      }}
+    }}
+
+    if (running.length === 0) {{
+      indicator.textContent = "";
+    }} else if (running.length === 1) {{
+      const j = running[0];
+      const pct = j.total_steps ? Math.round(100 * (j.step || 0) / j.total_steps) : null;
+      indicator.innerHTML = '<a href="/postings/' + j.posting_id + '" style="color:inherit;">' +
+        '\\u23f3 Generating' + (j.company_name ? ' for ' + j.company_name : '') +
+        (pct !== null ? ' (' + pct + '%)' : '') + '</a>';
+    }} else {{
+      indicator.innerHTML = '<a href="/jobs" style="color:inherit;">\\u23f3 ' + running.length + ' generations running</a>';
+    }}
+
+    setTimeout(poll, running.length > 0 ? 3000 : 8000);
+  }}
+  poll();
+}})();
+</script>
 </body>
 </html>"""
 
@@ -805,10 +954,46 @@ def posting_detail(posting_id):
 </div>
 <p class="sub" style="margin-top:10px;">Generated {_esc(draft.generated_at)} &middot; {draft.revision_rounds + 1} round(s)</p>"""
 
-    jd_preview = _esc(posting["description"][:400]) + ("…" if len(posting["description"]) > 400 else "")
+    active_job = _active_generate_job_for_posting(posting_id)
+
+    jd_full = _esc(posting["description"])
     regenerate_label = "Regenerate" if draft is not None else "Generate draft"
-    gen_form = f"""<details style="margin-top:24px;"><summary style="cursor:pointer;font-weight:600;">Job description (stored)</summary>
-  <p class="sub" style="white-space:pre-wrap;">{jd_preview}</p></details>
+
+    if active_job is not None:
+        total_steps = active_job.get("total_steps") or 0
+        step = active_job.get("step") or 0
+        pct = int(100 * step / total_steps) if total_steps else 0
+        current_label = _esc(active_job.get("current") or "starting…")
+        gen_form = f"""<details style="margin-top:24px;"><summary style="cursor:pointer;font-weight:600;">Job description (stored)</summary>
+  <p class="sub" style="white-space:pre-wrap;">{jd_full}</p></details>
+<div class="progress-panel" style="margin-top:16px;" data-job-id="{_esc(active_job['job_id'])}">
+  <p style="font-weight:600;margin:0 0 6px;">{'Regenerating' if draft is not None else 'Generating'}…</p>
+  <progress id="gen-progress" value="{step}" max="{total_steps or 1}" style="width:100%;height:10px;"></progress>
+  <p id="gen-progress-label" class="sub" style="margin-top:6px;">{current_label} ({step}/{total_steps or '?'})</p>
+</div>
+<script>
+(function() {{
+  const jobId = "{active_job['job_id']}";
+  async function poll() {{
+    const r = await fetch("/jobs/" + jobId + ".json");
+    if (!r.ok) {{ setTimeout(poll, 2500); return; }}
+    const j = await r.json();
+    if (j.status === "done" || j.status === "error") {{
+      window.location.reload();
+      return;
+    }}
+    const bar = document.getElementById("gen-progress");
+    const label = document.getElementById("gen-progress-label");
+    if (bar && j.total_steps) {{ bar.max = j.total_steps; bar.value = j.step || 0; }}
+    if (label) {{ label.textContent = (j.current || "working…") + " (" + (j.step || 0) + "/" + (j.total_steps || "?") + ")"; }}
+    setTimeout(poll, 2000);
+  }}
+  poll();
+}})();
+</script>"""
+    else:
+        gen_form = f"""<details style="margin-top:24px;" open><summary style="cursor:pointer;font-weight:600;">Job description (stored)</summary>
+  <p class="sub" style="white-space:pre-wrap;">{jd_full}</p></details>
 <form method="post" action="{url_for('generate', posting_id=posting_id)}" style="margin-top:16px;">
   {_generate_options_html()}
   <div class="btn-row"><button class="btn" type="submit">{regenerate_label}</button></div>
@@ -822,6 +1007,14 @@ def _generate_options_html() -> str:
     return """<div class="form-row">
   <label>Revision rounds (after first draft): <input type="number" name="revision_rounds" value="1" min="0" max="5"></label>
   <label><input type="checkbox" name="think"> Thorough mode (slower, "thinking" on)</label>
+</div>
+<div class="form-row">
+  <label for="stability">How much should revisions deviate from your original materials?</label>
+  <select id="stability" name="stability">
+    <option value="strict">Stay close to my materials (small tweaks only)</option>
+    <option value="balanced" selected>Balanced (default)</option>
+    <option value="loose">Optimize for this job description (more willing to change)</option>
+  </select>
 </div>"""
 
 
@@ -846,16 +1039,23 @@ def generate(posting_id):
     except ValueError:
         revision_rounds = 1
     think = request.form.get("think") == "on"
+    stability = request.form.get("stability") or "balanced"
+    if stability not in ("strict", "balanced", "loose"):
+        stability = "balanced"
 
     job_id = uuid.uuid4().hex[:12]
-    _set_job(job_id, status="queued", posting_id=posting_id, kind="generate")
+    _set_job(
+        job_id, status="queued", posting_id=posting_id, kind="generate",
+        company_name=posting["company"], job_title=posting["title"],
+    )
     thread = threading.Thread(
         target=_run_generation,
-        args=(job_id, posting_id, posting["company"], posting["title"], description, revision_rounds, think),
+        args=(job_id, posting_id, posting["company"], posting["title"], description,
+              revision_rounds, think, stability),
         daemon=True,
     )
     thread.start()
-    return redirect(url_for("job_status_page", job_id=job_id))
+    return redirect(url_for("posting_detail", posting_id=posting_id))
 
 
 @app.route("/scout/run", methods=["POST"])
@@ -1151,6 +1351,9 @@ async function poll() {{
     setTimeout(poll, 2000);
   }} else {{
     el.textContent = j.status === "running" ? "Running Writer \\u2192 Critic \\u2192 Revision\\u2026 (a few minutes on local models)" : "Queued\\u2026";
+    detailEl.textContent = j.total_steps
+      ? `${{j.current || "working"}} (step ${{j.step || 0}} of ${{j.total_steps}})`
+      : "";
     setTimeout(poll, 2500);
   }}
 }}
@@ -1185,6 +1388,7 @@ def posting_report(posting_id):
         job_title=posting["title"],
         job_description=posting["description"] or "",
         round_diffs=round_diffs,
+        dashboard_url=url_for("posting_detail", posting_id=posting_id, _external=True),
     )
     return Response(html_out, mimetype="text/html")
 
@@ -1196,7 +1400,12 @@ def posting_resume_pdf(posting_id):
     draft = drafts_db.get_latest_draft(conn, posting_id)
     if draft is None:
         abort(404)
-    html_out = render_resume_html(draft.result.final_draft)
+    settings = settings_db.get_candidate_settings(conn)
+    html_out = render_resume_html(
+        draft.result.final_draft,
+        candidate_name=settings.candidate_name,
+        contact_line=settings.contact_line,
+    )
     pdf_bytes = html_to_pdf_bytes(html_out)
     return Response(
         pdf_bytes,
@@ -1212,7 +1421,12 @@ def posting_cover_letter_pdf(posting_id):
     draft = drafts_db.get_latest_draft(conn, posting_id)
     if draft is None:
         abort(404)
-    html_out = render_cover_letter_html(draft.result.final_draft)
+    settings = settings_db.get_candidate_settings(conn)
+    html_out = render_cover_letter_html(
+        draft.result.final_draft,
+        candidate_name=settings.candidate_name,
+        contact_line=settings.contact_line,
+    )
     pdf_bytes = html_to_pdf_bytes(html_out)
     return Response(
         pdf_bytes,
@@ -1317,6 +1531,51 @@ def posting_manual_create():
     conn.commit()
     posting_id = cur.lastrowid
     return redirect(url_for("posting_detail", posting_id=posting_id))
+
+
+# ---------------------------------------------------------------------------
+# Candidate settings -- name/contact line for the PDF header
+# (resume_pdf.py's candidate_name/contact_line params, previously never
+# wired to anything -- see the 2026-08-13 handoff). A dashboard settings
+# page rather than a config/*.yaml file so it's editable without a
+# restart (see settings_db.py's module docstring for the reasoning).
+# ---------------------------------------------------------------------------
+
+
+@app.route("/settings")
+def settings_page():
+    conn = get_connection()
+    init_schema(conn)
+    settings = settings_db.get_candidate_settings(conn)
+    body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Settings</h1>
+    <p class="sub">Your name and contact line, used only for the resume/cover-letter
+    PDF header (resume_pdf.py) -- nothing else in BioHunter reads this.</p></div>
+  <form method="post" action="{url_for('settings_save')}">
+    <div class="form-row" style="display:block;"><label for="candidate_name">Full name</label>
+      <input class="wide" type="text" id="candidate_name" name="candidate_name"
+        value="{_esc(settings.candidate_name)}" placeholder="e.g. Jordan Rivera"></div>
+    <div class="form-row" style="display:block;margin-top:14px;"><label for="contact_line">Contact line</label>
+      <input class="wide" type="text" id="contact_line" name="contact_line"
+        value="{_esc(settings.contact_line)}"
+        placeholder="e.g. jordan@example.com &middot; (555) 123-4567 &middot; South San Francisco, CA"></div>
+    <div class="btn-row" style="margin-top:20px;">
+      <button class="btn" type="submit">Save</button>
+      <a class="btn btn--secondary" href="{url_for('index')}">Cancel</a>
+    </div>
+  </form>
+</div>"""
+    return _page("Settings", body)
+
+
+@app.route("/settings", methods=["POST"])
+def settings_save():
+    conn = get_connection()
+    init_schema(conn)
+    candidate_name = (request.form.get("candidate_name") or "").strip()
+    contact_line = (request.form.get("contact_line") or "").strip()
+    settings_db.save_candidate_settings(conn, candidate_name, contact_line)
+    return redirect(url_for("settings_page"))
 
 
 def main() -> None:

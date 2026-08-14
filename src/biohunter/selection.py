@@ -33,6 +33,43 @@ def parse_json_response(text: str, default: dict) -> dict:
         return default
 
 
+# ---------------------------------------------------------------------------
+# Deviation/stability control (2026-08-13 handoff: "revisions are small
+# tweaks, not major changes" vs. "vary the deviation... to better match
+# the job description"). Exposed as a per-generate-request setting from
+# the dashboard, not a global config value -- see revision.py/writer.py.
+#
+# Deliberately NOT a rewrite of the base critique_feedback sentence each
+# branch already has (see select_variant()/select_headings()/
+# select_bullets()/select_skills() below) -- "balanced" (the default)
+# reproduces the exact prior wording and behavior with zero change, so
+# every existing (pre-stability-param) call site stays a no-op. "strict"
+# and "loose" only ADD a clause on top of that, never remove the base one.
+# ---------------------------------------------------------------------------
+
+_STABILITY_SUFFIXES: dict[str, str] = {
+    "strict": (
+        " Strongly prefer keeping your previous selection here -- only swap it out "
+        "if the feedback specifically flags THIS item as weak, missing, or a poor "
+        "fit. Do not change something just because a different catalog entry might "
+        "also work; staying close to what was already selected matters more than "
+        "optimizing further unless the feedback says otherwise."
+    ),
+    "balanced": "",
+    "loose": (
+        " Don't hesitate to select something different from before if it's a "
+        "better match for THIS specific job description -- the goal is the best "
+        "possible fit for this posting, not consistency with earlier rounds."
+    ),
+}
+
+
+def _stability_suffix(stability: str) -> str:
+    """Unknown values degrade to 'balanced' (no-op) rather than raising --
+    same 'degrade, don't crash' pattern as parse_json_response()."""
+    return _STABILITY_SUFFIXES.get(stability, "")
+
+
 @dataclass
 class CatalogEntry:
     label: str
@@ -81,6 +118,7 @@ def select_variant(
     branch_name: str,
     think: bool = False,
     critique_feedback: str | None = None,
+    stability: str = "balanced",
 ) -> VariantSelection:
     """The shape shared by summary/intro/story/impact/gratitude: show the
     model a catalog of {label, text} entries, ask it to pick exactly one
@@ -112,6 +150,13 @@ def select_variant(
     rewriting), matching every other branch's verbatim-only guarantee.
     None (the default) reproduces the original prompt exactly, so this
     param is a no-op for every existing (non-revision) caller.
+
+    stability: "strict" | "balanced" (default) | "loose" -- see the
+    module-level _STABILITY_SUFFIXES comment. "balanced" reproduces the
+    original prompt text exactly (no-op for every existing caller);
+    "strict"/"loose" append one extra clause to the critique_feedback
+    text, only when critique_feedback is actually given (nothing to
+    bias on the first, feedback-free round).
     """
     prompt = (
         f"{instruction} "
@@ -125,6 +170,7 @@ def select_variant(
             f"\n\nA prior draft using this catalog was reviewed and received this "
             f"feedback -- consider it, and select a different label than before if "
             f"the feedback suggests a better fit exists in the catalog:\n{critique_feedback}"
+            f"{_stability_suffix(stability)}"
         )
 
     response = llm.complete(role, [{"role": "user", "content": prompt}], think=think, json_mode=True)
@@ -205,6 +251,7 @@ def select_headings(
     branch_name: str = "heading pass 1",
     think: bool = False,
     critique_feedback: str | None = None,
+    stability: str = "balanced",
 ) -> list[str]:
     """heading_payloads come from
     qdrant.fetch_by_section_type('professional_experience_heading').
@@ -234,6 +281,7 @@ def select_headings(
         prompt += (
             f"\n\nA prior draft using this catalog was reviewed and received this "
             f"feedback -- consider it when choosing which headings to include:\n{critique_feedback}"
+            f"{_stability_suffix(stability)}"
         )
 
     response = llm.complete(role, [{"role": "user", "content": prompt}], think=think, json_mode=True)
@@ -301,6 +349,7 @@ def select_bullets(
     branch_name: str = "bullet pass 2",
     think: bool = False,
     critique_feedback: str | None = None,
+    stability: str = "balanced",
 ) -> BulletSelection:
     """bullet_payloads come from
     qdrant.fetch_by_section_type('professional_experience_bullet',
@@ -340,6 +389,7 @@ def select_bullets(
             f"\n\nA prior draft using this catalog was reviewed and received this "
             f"feedback -- consider it, and select different bullets than before where "
             f"the feedback flags a bullet as weak or missing relevant keywords:\n{critique_feedback}"
+            f"{_stability_suffix(stability)}"
         )
 
     response = llm.complete(role, [{"role": "user", "content": prompt}], think=think, json_mode=True)
@@ -446,6 +496,7 @@ def select_skills(
     branch_name: str = "skills",
     think: bool = False,
     critique_feedback: str | None = None,
+    stability: str = "balanced",
 ) -> SkillsSelection:
     """skill_payloads come from
     qdrant.fetch_by_section_type('key_skills'). Each payload has 'text'
@@ -475,6 +526,7 @@ def select_skills(
             f"\n\nA prior draft using this catalog was reviewed and received this "
             f"feedback -- consider it, and select different/additional skills than "
             f"before where the feedback flags missing keywords:\n{critique_feedback}"
+            f"{_stability_suffix(stability)}"
         )
 
     response = llm.complete(role, [{"role": "user", "content": prompt}], think=think, json_mode=True)
@@ -574,6 +626,7 @@ def stitch_cover_letter(
     gratitude: VariantSelection,
     think: bool = False,
     critique_feedback: str | None = None,
+    stability: str = "balanced",
 ) -> str:
     """think: see select_variant()'s docstring.
 
@@ -584,6 +637,13 @@ def stitch_cover_letter(
     genuinely different story/impact/intro should be addressed by
     re-running select_variant() for that section, not by leaning on
     this pass to fix it via rewriting.
+
+    stability: see select_variant()'s docstring. Note this branch is
+    usually SKIPPED entirely on revision rounds where intro/story/
+    impact/gratitude didn't change from the prior round (see writer.py's
+    generate_draft()) -- when it does run, "strict" asks it to touch as
+    little wording as possible beyond the placeholder fills it already
+    only ever does, "loose" gives it more latitude on transitions/tone.
     """
     prompt = (
         "You are lightly editing four pre-selected cover letter sections into one "
@@ -614,6 +674,7 @@ def stitch_cover_letter(
             f"feedback -- address what you can within the light-edit constraints "
             f"above (tone, transitions, redundancy), without inventing new facts:"
             f"\n{critique_feedback}"
+            f"{_stability_suffix(stability)}"
         )
 
     response = llm.complete(role, [{"role": "user", "content": prompt}], think=think)

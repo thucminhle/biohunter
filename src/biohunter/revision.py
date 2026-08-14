@@ -21,6 +21,7 @@ however it wants.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .critic import critique_draft
 from .llm import LLMClient
@@ -50,6 +51,8 @@ def run_revision_loop(
     job_description: str,
     revision_rounds: int = 1,
     think: bool = False,
+    stability: str = "balanced",
+    on_step: Callable[[str], None] | None = None,
 ) -> RevisionResult:
     """Generates a first draft, critiques it, then re-generates and
     re-critiques up to `revision_rounds` more times, feeding each
@@ -73,19 +76,45 @@ def run_revision_loop(
     Early-stopping on Critic's recommendation is a reasonable future
     refinement, not built here to keep this pass's scope to what the
     handoff actually asked for.
+
+    stability: "strict" | "balanced" (default) | "loose" -- forwarded to
+    every generate_draft() call this loop makes (see writer.py's own
+    docstring for what each tier does). "balanced" reproduces the
+    original behavior exactly, so this param is a no-op for every
+    existing caller. Applies uniformly across all rounds, same as
+    `think` already does -- no partial-stability runs within one call.
+
+    on_step: optional callback, forwarded into every generate_draft()
+    call (its 9 units of work per round) plus called once more per
+    round for Critic's own pass ("round 0: critique", "round 1:
+    critique", ...) -- 10 calls per round total, so a caller wanting a
+    numeric progress bar can compute total_steps as
+    10 * (revision_rounds + 1) BEFORE starting, deterministically, since
+    every round always runs the same 10 units of work regardless of
+    what the models actually produce. None (the default) is a no-op for
+    every existing caller.
     """
-    draft = generate_draft(llm, company_name, job_title, job_description, think=think)
+    draft = generate_draft(
+        llm, company_name, job_title, job_description, think=think, stability=stability,
+        on_step=on_step,
+    )
     critique = critique_draft(
         llm, CRITIC_ROLE,
         company_name=company_name, job_title=job_title, job_description=job_description,
         tailored_summary=draft.tailored_summary, tailored_bullets=draft.tailored_bullets,
         cover_letter=draft.cover_letter, think=think,
     )
+    if on_step is not None:
+        on_step("round 0: critique")
     rounds = [RevisionRound(round_number=0, draft=draft, critique=critique)]
 
     for round_number in range(1, revision_rounds + 1):
         draft = generate_draft(
-            llm, company_name, job_title, job_description, think=think, critique_feedback=critique
+            llm, company_name, job_title, job_description, think=think, critique_feedback=critique,
+            stability=stability,
+            prev_cover_letter_blocks=draft.cover_letter_blocks,
+            prev_cover_letter=draft.cover_letter,
+            on_step=on_step,
         )
         critique = critique_draft(
             llm, CRITIC_ROLE,
@@ -93,6 +122,8 @@ def run_revision_loop(
             tailored_summary=draft.tailored_summary, tailored_bullets=draft.tailored_bullets,
             cover_letter=draft.cover_letter, think=think,
         )
+        if on_step is not None:
+            on_step(f"round {round_number}: critique")
         rounds.append(RevisionRound(round_number=round_number, draft=draft, critique=critique))
 
     return RevisionResult(final_draft=draft, final_critique=critique, rounds=rounds)

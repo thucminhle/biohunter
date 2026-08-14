@@ -333,11 +333,19 @@ def _set_job(job_id: str) -> None:
 def _get_job(job_id: str) -> dict | None:
     ...
 
+def _active_generate_job_for_posting(posting_id: int) -> dict | None:
+    """Returns the most recently started in-flight (queued/running)"""
+    ...
+
+def jobs_active_json():
+    """Powers the topbar's ambient job poller (see _page()'s <script>"""
+    ...
+
 def jobs_index():
     """Lists every job this dashboard process has run since it started --"""
     ...
 
-def _run_generation(job_id: str, posting_id: int, company_name: str, job_title: str, job_description: str, revision_rounds: int, think: bool) -> None:
+def _run_generation(job_id: str, posting_id: int, company_name: str, job_title: str, job_description: str, revision_rounds: int, think: bool, stability: str) -> None:
     """Runs in a background thread, started by POST /postings/<id>/generate."""
     ...
 
@@ -445,6 +453,12 @@ def posting_manual_form():
 def posting_manual_create():
     ...
 
+def settings_page():
+    ...
+
+def settings_save():
+    ...
+
 def main() -> None:
     ...
 
@@ -543,10 +557,18 @@ def main() -> None:
 # sections would hide exactly that failure mode instead of surfacing it.
 
 _DIFF_SECTIONS: tuple[tuple[str, str], ...] = (('tailored_summary', 'Tailored Summary'), ('tailored_bullets', 'Tailored Bullets'), ('cover_letter', 'Cover Letter'))
+_WORD_DIFF_SECTIONS = {'tailored_summary', 'cover_letter'}
+_WORD_SPLIT_RE = re.compile('\\s+|\\S+')
 class SectionDiff:
     section: str
     changed: bool
-    diff_text: str
+    mode: str = 'line'
+    diff_text: str = ''
+    word_ops: list[tuple[str, str]] = field(default_factory=list)
+
+def _word_diff_ops(prev_text: str, curr_text: str) -> list[tuple[str, str]]:
+    """Word-level SequenceMatcher diff for prose sections -- see the"""
+    ...
 
 class RoundDiff:
     round_from: int
@@ -726,6 +748,16 @@ def fetch_by_section_type(section_type: str | list[str], limit: int=20, extra_fi
 # everything this report needs. This is a rendering pass, same spirit as
 # diff.py's own docstring ("adds no new data").
 
+_BOLD_RE = re.compile('\\*\\*(.+?)\\*\\*')
+_ITALIC_RE = re.compile('(?<!\\*)\\*(?!\\*)(.+?)(?<!\\*)\\*(?!\\*)')
+def _render_inline_markdown(escaped_text: str) -> str:
+    """Takes ALREADY-html.escape()'d text and converts **bold**/*italic*"""
+    ...
+
+def _esc_inline(text: str) -> str:
+    """_esc() (html.escape) followed by inline-markdown conversion --"""
+    ...
+
 def _render_prose_block(text: str) -> str:
     """Blank-line-separated paragraphs, with '- ' runs collected into a"""
     ...
@@ -763,6 +795,10 @@ def _render_critique(critique_text: str) -> str:
 def _render_diff_line(line: str) -> str:
     ...
 
+def _render_word_diff(word_ops: list[tuple[str, str]]) -> str:
+    """Renders a word_ops list (see diff.py's _word_diff_ops()) as one"""
+    ...
+
 def _render_section_diff(section: SectionDiff) -> str:
     ...
 
@@ -770,8 +806,8 @@ def _render_round_history(rounds: list[RevisionRound], round_diffs: list[RoundDi
     """One <details> block per round after the first, each showing that"""
     ...
 
-_STYLE = '\n:root {\n  --bg: #F6F7F5;\n  --panel: #FFFFFF;\n  --ink: #17231F;\n  --ink-soft: #52625C;\n  --ink-faint: #8B978F;\n  --hairline: #DCE3DE;\n  --accent: #0E6E58;\n  --accent-soft: #E4F1EC;\n  --good: #0E6E58;\n  --good-bg: #E4F1EC;\n  --mid: #B4780F;\n  --mid-bg: #FBEED9;\n  --low: #B0402A;\n  --low-bg: #FBE3DC;\n  --unknown: #8B978F;\n  --unknown-bg: #EDEFEC;\n  --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;\n  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;\n}\n* { box-sizing: border-box; }\nbody {\n  margin: 0;\n  background: var(--bg);\n  color: var(--ink);\n  font-family: var(--sans);\n  line-height: 1.55;\n  -webkit-font-smoothing: antialiased;\n}\n.wrap { max-width: 880px; margin: 0 auto; padding: 0 24px 96px; }\n\n/* ---- Header band: lab-requisition styling, mono readout ---- */\n.header {\n  background: var(--ink);\n  color: #F6F7F5;\n  padding: 40px 24px 32px;\n}\n.header__inner { max-width: 880px; margin: 0 auto; }\n.header__id {\n  font-family: var(--mono);\n  font-size: 12.5px;\n  letter-spacing: 0.06em;\n  color: #9FD6C2;\n  text-transform: uppercase;\n  margin-bottom: 14px;\n}\n.header__title { font-size: 28px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }\n.header__subtitle { font-size: 15px; color: #C4CCC7; margin: 0 0 24px; }\n.header__meta {\n  display: flex; flex-wrap: wrap; gap: 28px;\n  font-family: var(--mono); font-size: 12px; color: #9FA8A2;\n  border-top: 1px solid #2C3B35; padding-top: 16px;\n}\n.header__meta strong { color: #DDE4E0; font-weight: 600; }\n\n/* ---- Score hero ---- */\n.hero {\n  display: flex; align-items: flex-start; gap: 24px;\n  background: var(--panel); border: 1px solid var(--hairline);\n  border-radius: 4px; padding: 28px; margin: -28px 0 28px;\n  box-shadow: 0 1px 2px rgba(23,35,31,0.04);\n}\n.dial { text-align: center; min-width: 108px; }\n.dial__value {\n  font-family: var(--mono); font-size: 44px; font-weight: 700; line-height: 1;\n}\n.dial__max { font-size: 18px; font-weight: 500; color: var(--ink-faint); }\n.dial__label {\n  margin-top: 8px; font-family: var(--mono); font-size: 11px;\n  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint);\n}\n.dial--good .dial__value { color: var(--good); }\n.dial--mid .dial__value { color: var(--mid); }\n.dial--low .dial__value { color: var(--low); }\n.dial--unknown .dial__value { color: var(--unknown); }\n.dial__rationale { margin: 0; padding-top: 6px; color: var(--ink-soft); font-size: 15px; flex: 1; }\n.hero > .dial__rationale { align-self: center; }\n\n/* ---- Panels ---- */\n.panel {\n  background: var(--panel); border: 1px solid var(--hairline);\n  border-radius: 4px; padding: 24px 28px; margin-bottom: 20px;\n}\n.panel__eyebrow {\n  font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;\n  text-transform: uppercase; color: var(--accent); margin-bottom: 6px;\n}\n.panel__title { font-size: 19px; margin: 0 0 14px; font-weight: 650; }\n.panel__body p { margin: 0 0 12px; color: var(--ink); }\n.panel__body p:last-child { margin-bottom: 0; }\n.panel__body ul { margin: 0 0 12px; padding-left: 20px; }\n.panel__body li { margin-bottom: 6px; }\n.panel__body .empty { color: var(--ink-faint); font-style: italic; }\n\n.subsection { margin-bottom: 18px; }\n.subsection:last-child { margin-bottom: 0; }\n.subsection h3 {\n  font-size: 13px; font-weight: 650; text-transform: uppercase;\n  letter-spacing: 0.04em; color: var(--ink-soft); margin: 0 0 8px;\n  border-bottom: 1px solid var(--hairline); padding-bottom: 6px;\n}\n.subsection p, .subsection ul { color: var(--ink); }\n\n/* ---- Diff / round history ---- */\n.round {\n  border: 1px solid var(--hairline); border-radius: 4px;\n  margin-bottom: 10px; background: var(--panel);\n}\n.round--base { padding: 14px 18px; }\n.round__head {\n  display: flex; align-items: center; gap: 12px; cursor: pointer;\n  padding: 14px 18px; font-weight: 600; font-size: 14.5px;\n  list-style: none;\n}\n.round__head::-webkit-details-marker { display: none; }\n.round__head::before { content: "\\25B8"; color: var(--ink-faint); font-size: 12px; }\ndetails[open] > .round__head::before { content: "\\25BE"; }\n.round--base .round__head::before { content: ""; }\n.round__score {\n  font-family: var(--mono); font-size: 12px; padding: 2px 8px;\n  border-radius: 3px; margin-left: auto;\n}\n.round__score--good { color: var(--good); background: var(--good-bg); }\n.round__score--mid { color: var(--mid); background: var(--mid-bg); }\n.round__score--low { color: var(--low); background: var(--low-bg); }\n.round__score--unknown { color: var(--unknown); background: var(--unknown-bg); }\n.round__body { padding: 4px 18px 16px; }\n\npre.diff {\n  font-family: var(--mono); font-size: 12.5px; line-height: 1.55;\n  background: #0F1714; color: #DDE4E0; border-radius: 4px;\n  padding: 12px 14px; overflow-x: auto; margin: 0;\n}\n.diffline { display: block; white-space: pre; }\n.diffline--add { color: #8FD9B6; }\n.diffline--del { color: #F0A594; }\n.diffline--hunk { color: #7FB8D6; }\n.diffline--hdr { color: #9FA8A2; }\n.diffline--ctx { color: #C4CCC7; }\n\n/* ---- Job description (collapsed by default) ---- */\ndetails.jd summary {\n  cursor: pointer; font-family: var(--mono); font-size: 12px;\n  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft);\n  padding: 10px 0;\n}\ndetails.jd .panel__body { white-space: pre-wrap; font-size: 14px; color: var(--ink-soft); }\n\n.raw-critique summary {\n  cursor: pointer; font-family: var(--mono); font-size: 12px;\n  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft);\n  padding: 4px 0 12px;\n}\n.raw-critique pre {\n  white-space: pre-wrap; font-family: var(--sans); font-size: 14px;\n  color: var(--ink); background: none; margin: 0; padding: 0;\n}\n\n.footer {\n  color: var(--ink-faint); font-size: 12px; font-family: var(--mono);\n  text-align: center; padding-top: 12px;\n}\n\n@media (max-width: 640px) {\n  .hero { flex-direction: column; align-items: center; text-align: center; }\n  .header { padding: 28px 16px 24px; }\n  .panel { padding: 18px; }\n}\n'
-def render_posting_report(result: RevisionResult, company_name: str, job_title: str, job_description: str, round_diffs: list[RoundDiff] | None=None, model_routing: dict[str, str] | None=None, generated_at: datetime.datetime | None=None) -> str:
+_STYLE = '\n:root {\n  --bg: #F6F7F5;\n  --panel: #FFFFFF;\n  --ink: #17231F;\n  --ink-soft: #52625C;\n  --ink-faint: #8B978F;\n  --hairline: #DCE3DE;\n  --accent: #0E6E58;\n  --accent-soft: #E4F1EC;\n  --good: #0E6E58;\n  --good-bg: #E4F1EC;\n  --mid: #B4780F;\n  --mid-bg: #FBEED9;\n  --low: #B0402A;\n  --low-bg: #FBE3DC;\n  --unknown: #8B978F;\n  --unknown-bg: #EDEFEC;\n  --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;\n  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;\n}\n* { box-sizing: border-box; }\nbody {\n  margin: 0;\n  background: var(--bg);\n  color: var(--ink);\n  font-family: var(--sans);\n  line-height: 1.55;\n  -webkit-font-smoothing: antialiased;\n}\n.wrap { max-width: 880px; margin: 0 auto; padding: 0 24px 96px; }\n\n/* ---- Header band: lab-requisition styling, mono readout ---- */\n.header {\n  background: var(--ink);\n  color: #F6F7F5;\n  padding: 40px 24px 32px;\n}\n.header__inner { max-width: 880px; margin: 0 auto; }\n.header__id {\n  font-family: var(--mono);\n  font-size: 12.5px;\n  letter-spacing: 0.06em;\n  color: #9FD6C2;\n  text-transform: uppercase;\n  margin-bottom: 14px;\n}\n.header__title { font-size: 28px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }\n.header__subtitle { font-size: 15px; color: #C4CCC7; margin: 0 0 24px; }\n.header__meta {\n  display: flex; flex-wrap: wrap; gap: 28px;\n  font-family: var(--mono); font-size: 12px; color: #9FA8A2;\n  border-top: 1px solid #2C3B35; padding-top: 16px;\n}\n.header__meta strong { color: #DDE4E0; font-weight: 600; }\n.header__link { color: #9FD6C2; text-decoration: none; font-weight: 600; }\n.header__link:hover { text-decoration: underline; }\n\n/* ---- Score hero ---- */\n.hero {\n  display: flex; align-items: flex-start; gap: 24px;\n  background: var(--panel); border: 1px solid var(--hairline);\n  border-radius: 4px; padding: 28px; margin: -28px 0 28px;\n  box-shadow: 0 1px 2px rgba(23,35,31,0.04);\n}\n.dial { text-align: center; min-width: 108px; }\n.dial__value {\n  font-family: var(--mono); font-size: 44px; font-weight: 700; line-height: 1;\n}\n.dial__max { font-size: 18px; font-weight: 500; color: var(--ink-faint); }\n.dial__label {\n  margin-top: 8px; font-family: var(--mono); font-size: 11px;\n  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint);\n}\n.dial--good .dial__value { color: var(--good); }\n.dial--mid .dial__value { color: var(--mid); }\n.dial--low .dial__value { color: var(--low); }\n.dial--unknown .dial__value { color: var(--unknown); }\n.dial__rationale { margin: 0; padding-top: 6px; color: var(--ink-soft); font-size: 15px; flex: 1; }\n.hero > .dial__rationale { align-self: center; }\n\n/* ---- Panels ---- */\n.panel {\n  background: var(--panel); border: 1px solid var(--hairline);\n  border-radius: 4px; padding: 24px 28px; margin-bottom: 20px;\n}\n.panel__eyebrow {\n  font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em;\n  text-transform: uppercase; color: var(--accent); margin-bottom: 6px;\n}\n.panel__title { font-size: 19px; margin: 0 0 14px; font-weight: 650; }\n.panel__body p { margin: 0 0 12px; color: var(--ink); }\n.panel__body p:last-child { margin-bottom: 0; }\n.panel__body ul { margin: 0 0 12px; padding-left: 20px; }\n.panel__body li { margin-bottom: 6px; }\n.panel__body .empty { color: var(--ink-faint); font-style: italic; }\n\n.subsection { margin-bottom: 18px; }\n.subsection:last-child { margin-bottom: 0; }\n.subsection h3 {\n  font-size: 13px; font-weight: 650; text-transform: uppercase;\n  letter-spacing: 0.04em; color: var(--ink-soft); margin: 0 0 8px;\n  border-bottom: 1px solid var(--hairline); padding-bottom: 6px;\n}\n.subsection p, .subsection ul { color: var(--ink); }\n\n/* ---- Diff / round history ---- */\n.round {\n  border: 1px solid var(--hairline); border-radius: 4px;\n  margin-bottom: 10px; background: var(--panel);\n}\n.round--base { padding: 14px 18px; }\n.round__head {\n  display: flex; align-items: center; gap: 12px; cursor: pointer;\n  padding: 14px 18px; font-weight: 600; font-size: 14.5px;\n  list-style: none;\n}\n.round__head::-webkit-details-marker { display: none; }\n.round__head::before { content: "\\25B8"; color: var(--ink-faint); font-size: 12px; }\ndetails[open] > .round__head::before { content: "\\25BE"; }\n.round--base .round__head::before { content: ""; }\n.round__score {\n  font-family: var(--mono); font-size: 12px; padding: 2px 8px;\n  border-radius: 3px; margin-left: auto;\n}\n.round__score--good { color: var(--good); background: var(--good-bg); }\n.round__score--mid { color: var(--mid); background: var(--mid-bg); }\n.round__score--low { color: var(--low); background: var(--low-bg); }\n.round__score--unknown { color: var(--unknown); background: var(--unknown-bg); }\n.round__body { padding: 4px 18px 16px; }\n\npre.diff {\n  font-family: var(--mono); font-size: 12.5px; line-height: 1.55;\n  background: #0F1714; color: #DDE4E0; border-radius: 4px;\n  padding: 12px 14px; margin: 0;\n  /* was white-space: pre with overflow-x: auto -- fine for short code\n     diffs, unreadable for long text lines (a whole paragraph as one\n     "line" renders as one unbroken horizontal string). pre-wrap keeps\n     the monospace/whitespace-significant formatting real diffs still\n     want while actually wrapping long lines inside the panel. */\n  white-space: pre-wrap;\n  overflow-wrap: break-word;\n}\n.diffline { display: block; }\n.diffline--add { color: #8FD9B6; }\n.diffline--del { color: #F0A594; }\n.diffline--hunk { color: #7FB8D6; }\n.diffline--hdr { color: #9FA8A2; }\n.diffline--ctx { color: #C4CCC7; }\n\n/* ---- Word-level diff (prose sections: summary, cover letter) ---- */\np.worddiff {\n  font-size: 14.5px; line-height: 1.6; color: var(--ink);\n  background: var(--bg); border-radius: 4px; padding: 12px 14px; margin: 0;\n  white-space: pre-wrap; overflow-wrap: break-word;\n}\n.worddiff__del {\n  color: var(--low); background: var(--low-bg); text-decoration: line-through;\n  text-decoration-thickness: 1px; border-radius: 2px; padding: 0 1px;\n}\n.worddiff__ins {\n  color: var(--good); background: var(--good-bg); text-decoration: none;\n  border-radius: 2px; padding: 0 1px;\n}\n\n/* ---- Job description (collapsed by default) ---- */\ndetails.jd summary {\n  cursor: pointer; font-family: var(--mono); font-size: 12px;\n  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft);\n  padding: 10px 0;\n}\ndetails.jd .panel__body { white-space: pre-wrap; font-size: 14px; color: var(--ink-soft); }\n\n.raw-critique summary {\n  cursor: pointer; font-family: var(--mono); font-size: 12px;\n  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft);\n  padding: 4px 0 12px;\n}\n.raw-critique pre {\n  white-space: pre-wrap; font-family: var(--sans); font-size: 14px;\n  color: var(--ink); background: none; margin: 0; padding: 0;\n}\n\n.footer {\n  color: var(--ink-faint); font-size: 12px; font-family: var(--mono);\n  text-align: center; padding-top: 12px;\n}\n\n@media (max-width: 640px) {\n  .hero { flex-direction: column; align-items: center; text-align: center; }\n  .header { padding: 28px 16px 24px; }\n  .panel { padding: 18px; }\n}\n'
+def render_posting_report(result: RevisionResult, company_name: str, job_title: str, job_description: str, round_diffs: list[RoundDiff] | None=None, model_routing: dict[str, str] | None=None, generated_at: datetime.datetime | None=None, dashboard_url: str | None=None) -> str:
     """Renders one posting's full pipeline output as a self-contained"""
     ...
 
@@ -854,7 +890,7 @@ class RevisionResult:
     final_critique: str
     rounds: list[RevisionRound] = field(default_factory=list)
 
-def run_revision_loop(llm: LLMClient, company_name: str, job_title: str, job_description: str, revision_rounds: int=1, think: bool=False) -> RevisionResult:
+def run_revision_loop(llm: LLMClient, company_name: str, job_title: str, job_description: str, revision_rounds: int=1, think: bool=False, stability: str='balanced', on_step: Callable[[str], None] | None=None) -> RevisionResult:
     """Generates a first draft, critiques it, then re-generates and"""
     ...
 
@@ -1063,6 +1099,11 @@ def parse_json_response(text: str, default: dict) -> dict:
     """Ports the try/catch-with-default pattern every n8n parse node"""
     ...
 
+_STABILITY_SUFFIXES: dict[str, str] = {'strict': ' Strongly prefer keeping your previous selection here -- only swap it out if the feedback specifically flags THIS item as weak, missing, or a poor fit. Do not change something just because a different catalog entry might also work; staying close to what was already selected matters more than optimizing further unless the feedback says otherwise.', 'balanced': '', 'loose': " Don't hesitate to select something different from before if it's a better match for THIS specific job description -- the goal is the best possible fit for this posting, not consistency with earlier rounds."}
+def _stability_suffix(stability: str) -> str:
+    """Unknown values degrade to 'balanced' (no-op) rather than raising --"""
+    ...
+
 class CatalogEntry:
     label: str
     text: str
@@ -1080,7 +1121,7 @@ class VariantSelection:
     text: str
     alignment_text: str = ''
 
-def select_variant(llm: LLMClient, role: str, instruction: str, job_description: str, catalog: list[CatalogEntry], branch_name: str, think: bool=False, critique_feedback: str | None=None) -> VariantSelection:
+def select_variant(llm: LLMClient, role: str, instruction: str, job_description: str, catalog: list[CatalogEntry], branch_name: str, think: bool=False, critique_feedback: str | None=None, stability: str='balanced') -> VariantSelection:
     """The shape shared by summary/intro/story/impact/gratitude: show the"""
     ...
 
@@ -1090,7 +1131,7 @@ STORY_INSTRUCTION = 'You are selecting exactly ONE pre-written cover letter stor
 IMPACT_INSTRUCTION = 'You are selecting exactly ONE pre-written cover letter forward-looking impact statement that best matches this job description. Choose one label from the catalog below verbatim -- do not edit, rephrase, merge, or invent.'
 GRATITUDE_INSTRUCTION = 'You are selecting exactly ONE pre-written cover letter closing/gratitude paragraph that best matches this job description. Choose one label from the catalog below verbatim -- do not edit, rephrase, merge, or invent.'
 HEADING_INSTRUCTION = 'You are selecting which Professional Experience headings are relevant to this job description. You may select headings from different resume flavors (e.g. an AI role and an LC-MS role can both draw headings) -- cross-flavor hybrid combinations are allowed and expected when justified. Select only from the exact heading catalog below, do not invent new headings.'
-def select_headings(llm: LLMClient, role: str, job_description: str, heading_payloads: list[dict], branch_name: str='heading pass 1', think: bool=False, critique_feedback: str | None=None) -> list[str]:
+def select_headings(llm: LLMClient, role: str, job_description: str, heading_payloads: list[dict], branch_name: str='heading pass 1', think: bool=False, critique_feedback: str | None=None, stability: str='balanced') -> list[str]:
     """heading_payloads come from"""
     ...
 
@@ -1099,7 +1140,7 @@ class BulletSelection:
     validated_selection: dict[str, list[str]] = field(default_factory=dict)
     tailored_bullets: str = ''
 
-def select_bullets(llm: LLMClient, role: str, job_description: str, selected_headings: list[str], bullet_payloads: list[dict], branch_name: str='bullet pass 2', think: bool=False, critique_feedback: str | None=None) -> BulletSelection:
+def select_bullets(llm: LLMClient, role: str, job_description: str, selected_headings: list[str], bullet_payloads: list[dict], branch_name: str='bullet pass 2', think: bool=False, critique_feedback: str | None=None, stability: str='balanced') -> BulletSelection:
     """bullet_payloads come from"""
     ...
 
@@ -1108,7 +1149,7 @@ class SkillsSelection:
     validated_selection: list[str] = field(default_factory=list)
     tailored_skills: str = ''
 
-def select_skills(llm: LLMClient, role: str, job_description: str, skill_payloads: list[dict], branch_name: str='skills', think: bool=False, critique_feedback: str | None=None) -> SkillsSelection:
+def select_skills(llm: LLMClient, role: str, job_description: str, skill_payloads: list[dict], branch_name: str='skills', think: bool=False, critique_feedback: str | None=None, stability: str='balanced') -> SkillsSelection:
     """skill_payloads come from"""
     ...
 
@@ -1124,7 +1165,7 @@ def load_always_full_sections(payloads: list[dict]) -> AlwaysFullSections:
     """payloads come from"""
     ...
 
-def stitch_cover_letter(llm: LLMClient, role: str, job_title: str, company_name: str, job_description: str, intro: VariantSelection, story: VariantSelection, impact: VariantSelection, gratitude: VariantSelection, think: bool=False, critique_feedback: str | None=None) -> str:
+def stitch_cover_letter(llm: LLMClient, role: str, job_title: str, company_name: str, job_description: str, intro: VariantSelection, story: VariantSelection, impact: VariantSelection, gratitude: VariantSelection, think: bool=False, critique_feedback: str | None=None, stability: str='balanced') -> str:
     """think: see select_variant()'s docstring."""
     ...
 
@@ -1134,6 +1175,39 @@ class DraftResume:
     cover_letter: str
 
 def assemble_draft(summary_text: str, bullets_markdown: str, skills_markdown: str, always: AlwaysFullSections, cover_letter: str) -> DraftResume:
+    ...
+
+```
+
+## `src/biohunter/settings_db.py`
+```python
+# Candidate settings: your name + a contact line, used to fill in the
+# resume/cover-letter PDF header (resume_pdf.py's candidate_name/
+# contact_line params, which every existing caller has always left blank
+# -- see the 2026-08-13 handoff's "candidate name/contact info is never
+# wired into the PDF export" gap).
+#
+# Deliberately a dashboard-editable DB row, not a config/*.yaml file --
+# unlike companies.yaml/search_criteria.yaml (which are meant to be
+# git-ignored, hand-edited files defining WHAT the search targets),
+# candidate_settings is closer to drafts.py's territory: something that
+# changes via a browser form and should take effect without a restart or
+# a file edit. See schema.sql's candidate_settings table -- one singleton
+# row (id=1), upserted, never inserted twice.
+#
+# Same shape as drafts_db.py on purpose: a small dataclass, a get, a
+# save, no ORM.
+
+class CandidateSettings:
+    candidate_name: str = ''
+    contact_line: str = ''
+
+def get_candidate_settings(conn) -> CandidateSettings:
+    """Returns the current settings, or an all-blank CandidateSettings if"""
+    ...
+
+def save_candidate_settings(conn, candidate_name: str, contact_line: str) -> None:
+    """Upserts the singleton row. SQLite/libSQL's `INSERT ... ON CONFLICT`"""
     ...
 
 ```
@@ -1157,8 +1231,9 @@ class WriterDraft:
     tailored_summary: str
     tailored_bullets: str
     cover_letter: str
+    cover_letter_blocks: tuple[str, str, str, str] = ('', '', '', '')
 
-def generate_draft(llm: LLMClient, company_name: str, job_title: str, job_description: str, think: bool=False, critique_feedback: str | None=None) -> WriterDraft:
+def generate_draft(llm: LLMClient, company_name: str, job_title: str, job_description: str, think: bool=False, critique_feedback: str | None=None, stability: str='balanced', prev_cover_letter_blocks: tuple[str, str, str, str] | None=None, prev_cover_letter: str | None=None, on_step: Callable[[str], None] | None=None) -> WriterDraft:
     """Runs the full 8-branch selection pipeline for one posting and"""
     ...
 

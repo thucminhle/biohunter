@@ -141,6 +141,21 @@ CREATE TABLE IF NOT EXISTS drafts (
     result_json     TEXT NOT NULL
 );
 
+-- Candidate's own name/contact line for the PDF header (resume_pdf.py).
+-- Singleton table (id always 1, enforced by the CHECK) -- there's only
+-- one candidate using this tool, so a key-value or per-user table would
+-- be unused generality. Editable from the dashboard's /settings page
+-- rather than a yaml file, so it's changeable without a redeploy/restart
+-- (see the 2026-08-13 handoff discussion on where this should live).
+-- Row is upserted, never inserted twice -- save_candidate_settings() in
+-- settings_db.py always targets id=1.
+CREATE TABLE IF NOT EXISTS candidate_settings (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    candidate_name TEXT,
+    contact_line   TEXT,
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_postings_status ON postings(status);
 CREATE INDEX IF NOT EXISTS idx_postings_company ON postings(company_id);
 CREATE INDEX IF NOT EXISTS idx_drafts_posting ON drafts(posting_id);

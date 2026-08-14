@@ -49,12 +49,50 @@ from .revision import RevisionResult, RevisionRound
 
 _esc = html.escape
 
+# Inline markdown this project's own text can plausibly contain within a
+# paragraph/bullet line -- NOT a general markdown renderer (see the
+# module docstring above), just the two emphasis forms a local model
+# reaches for on its own even though nothing in this codebase's prompts
+# asks it to (2026-08-13 handoff: literal "**"/"###" showing up in the
+# PDF). Bold before italic so "**x**" doesn't get half-eaten by the
+# italic pattern first (a lone "*" left over from a stripped "**" would
+# otherwise pair with the next real "*" and italicize the wrong span).
+# Order of operations: escape the raw text FIRST (so any "<"/">"/"&" a
+# model emits is neutralized), then apply these on the already-escaped
+# string -- "**"/"*" survive html.escape() untouched, so this is safe.
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
+
+
+def _render_inline_markdown(escaped_text: str) -> str:
+    """Takes ALREADY-html.escape()'d text and converts **bold**/*italic*
+    markers to <strong>/<em>. Never call this on unescaped text -- see
+    _esc_inline() below, which is the one function every caller should
+    actually use."""
+    text = _BOLD_RE.sub(r"<strong>\1</strong>", escaped_text)
+    text = _ITALIC_RE.sub(r"<em>\1</em>", text)
+    return text
+
+
+def _esc_inline(text: str) -> str:
+    """_esc() (html.escape) followed by inline-markdown conversion --
+    the one function callers in this module should use for any text
+    that will be displayed as part of a sentence (as opposed to _esc()
+    alone, which is still correct for things like attribute values or
+    headings where markdown emphasis wouldn't make sense)."""
+    return _render_inline_markdown(_esc(text))
+
 
 def _render_prose_block(text: str) -> str:
     """Blank-line-separated paragraphs, with '- ' runs collected into a
-    <ul>. Everything is escaped -- this text can originate from a job
-    posting, a local LLM, or a resume catalog, none of which are a
-    trusted markup source."""
+    <ul>. Everything is escaped before any markdown conversion -- this
+    text can originate from a job posting, a local LLM, or a resume
+    catalog, none of which are a trusted markup source. A stray '### '
+    line inside a block (a nested sub-heading a model wasn't asked for,
+    but sometimes produces anyway) is rendered as a small inline label
+    rather than left as literal hash characters or promoted to a real
+    <h3> that would visually compete with this report's own fixed
+    section headings."""
     text = (text or "").strip()
     if not text:
         return '<p class="empty">(none)</p>'
@@ -66,15 +104,21 @@ def _render_prose_block(text: str) -> str:
         if not lines:
             continue
         if all(ln.startswith(("- ", "* ")) for ln in lines):
-            items = "".join(f"<li>{_esc(ln[2:].strip())}</li>" for ln in lines)
+            items = "".join(f"<li>{_esc_inline(ln[2:].strip())}</li>" for ln in lines)
             parts.append(f"<ul>{items}</ul>")
         else:
+            rendered_lines = []
+            for ln in lines:
+                sub_heading = re.match(r"^#{1,6}\s+(.+)$", ln)
+                if sub_heading:
+                    rendered_lines.append(f"<strong>{_esc_inline(sub_heading.group(1))}</strong>")
+                else:
+                    rendered_lines.append(_esc_inline(ln))
             # Preserve single line breaks within a paragraph (e.g. a
             # cover letter's salutation/signature lines) as <br>, since
             # collapsing them to one line would run "Dear Hiring
             # Manager," into the next sentence.
-            para = "<br>".join(_esc(ln) for ln in lines)
-            parts.append(f"<p>{para}</p>")
+            parts.append(f"<p>{'<br>'.join(rendered_lines)}</p>")
     return "\n".join(parts) or '<p class="empty">(none)</p>'
 
 
@@ -137,7 +181,7 @@ def report_id(company_name: str, job_title: str, when: datetime.datetime | None 
 def _render_score_dial(score_result: ScoreResult, label: str) -> str:
     bucket = _score_bucket(score_result.score)
     value = str(score_result.score) if score_result.score is not None else "?"
-    rationale = _esc(score_result.rationale) if score_result.rationale else "Score did not parse from the critique."
+    rationale = _esc_inline(score_result.rationale) if score_result.rationale else "Score did not parse from the critique."
     return (
         f'<div class="dial dial--{bucket}">'
         f'<div class="dial__value">{value}<span class="dial__max">/10</span></div>'
@@ -226,17 +270,39 @@ def _render_diff_line(line: str) -> str:
     return f'<span class="diffline diffline--{cls}">{_esc(line)}</span>'
 
 
+def _render_word_diff(word_ops: list[tuple[str, str]]) -> str:
+    """Renders a word_ops list (see diff.py's _word_diff_ops()) as one
+    wrapping paragraph with inline <ins>/<del> spans -- the prose
+    counterpart to _render_diff_line()'s line-based +/- rendering.
+    Unlike the line-diff view, this does NOT show both old and new as
+    separate blocks; deletions and insertions are interleaved inline,
+    in reading order, which is what actually makes a wording change
+    scannable in a paragraph (the 2026-08-13 handoff's core complaint
+    about the old line-diff view on prose)."""
+    parts = []
+    for tag, token in word_ops:
+        escaped = _esc(token)
+        if tag == "equal":
+            parts.append(escaped)
+        elif tag == "delete":
+            parts.append(f'<del class="worddiff__del">{escaped}</del>')
+        elif tag == "insert":
+            parts.append(f'<ins class="worddiff__ins">{escaped}</ins>')
+    return f'<p class="worddiff">{"".join(parts)}</p>'
+
+
 def _render_section_diff(section: SectionDiff) -> str:
     if not section.changed:
         return (
             f'<div class="subsection"><h3>{_esc(section.section)}</h3>'
             f'<p class="empty">(unchanged)</p></div>'
         )
-    lines = "\n".join(_render_diff_line(ln) for ln in section.diff_text.splitlines())
-    return (
-        f'<div class="subsection"><h3>{_esc(section.section)}</h3>'
-        f'<pre class="diff">{lines}</pre></div>'
-    )
+    if section.mode == "word":
+        body = _render_word_diff(section.word_ops)
+    else:
+        lines = "\n".join(_render_diff_line(ln) for ln in section.diff_text.splitlines())
+        body = f'<pre class="diff">{lines}</pre>'
+    return f'<div class="subsection"><h3>{_esc(section.section)}</h3>{body}</div>'
 
 
 def _render_round_history(rounds: list[RevisionRound], round_diffs: list[RoundDiff]) -> str:
@@ -338,6 +404,8 @@ body {
   border-top: 1px solid #2C3B35; padding-top: 16px;
 }
 .header__meta strong { color: #DDE4E0; font-weight: 600; }
+.header__link { color: #9FD6C2; text-decoration: none; font-weight: 600; }
+.header__link:hover { text-decoration: underline; }
 
 /* ---- Score hero ---- */
 .hero {
@@ -415,14 +483,36 @@ details[open] > .round__head::before { content: "\\25BE"; }
 pre.diff {
   font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
   background: #0F1714; color: #DDE4E0; border-radius: 4px;
-  padding: 12px 14px; overflow-x: auto; margin: 0;
+  padding: 12px 14px; margin: 0;
+  /* was white-space: pre with overflow-x: auto -- fine for short code
+     diffs, unreadable for long text lines (a whole paragraph as one
+     "line" renders as one unbroken horizontal string). pre-wrap keeps
+     the monospace/whitespace-significant formatting real diffs still
+     want while actually wrapping long lines inside the panel. */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
 }
-.diffline { display: block; white-space: pre; }
+.diffline { display: block; }
 .diffline--add { color: #8FD9B6; }
 .diffline--del { color: #F0A594; }
 .diffline--hunk { color: #7FB8D6; }
 .diffline--hdr { color: #9FA8A2; }
 .diffline--ctx { color: #C4CCC7; }
+
+/* ---- Word-level diff (prose sections: summary, cover letter) ---- */
+p.worddiff {
+  font-size: 14.5px; line-height: 1.6; color: var(--ink);
+  background: var(--bg); border-radius: 4px; padding: 12px 14px; margin: 0;
+  white-space: pre-wrap; overflow-wrap: break-word;
+}
+.worddiff__del {
+  color: var(--low); background: var(--low-bg); text-decoration: line-through;
+  text-decoration-thickness: 1px; border-radius: 2px; padding: 0 1px;
+}
+.worddiff__ins {
+  color: var(--good); background: var(--good-bg); text-decoration: none;
+  border-radius: 2px; padding: 0 1px;
+}
 
 /* ---- Job description (collapsed by default) ---- */
 details.jd summary {
@@ -463,6 +553,7 @@ def render_posting_report(
     round_diffs: list[RoundDiff] | None = None,
     model_routing: dict[str, str] | None = None,
     generated_at: datetime.datetime | None = None,
+    dashboard_url: str | None = None,
 ) -> str:
     """Renders one posting's full pipeline output as a self-contained
     HTML string.
@@ -488,6 +579,14 @@ def render_posting_report(
     generated_at: defaults to now (UTC). Exposed as a param mainly so
     tests/spot-checks can pass a fixed timestamp instead of asserting
     against a moving target.
+
+    dashboard_url: optional link back to this posting's dashboard page
+    (e.g. http://localhost:5050/postings/123), rendered as a link in the
+    header. None (the default) omits it entirely -- this is the right
+    default for cli.py's `report` command, which has no running
+    dashboard to link back to; dashboard.py's posting_report() route is
+    the one real caller that passes this (2026-08-13 handoff: reports
+    had no way back to the dashboard that generated them).
     """
     round_diffs = round_diffs or []
     generated_at = generated_at or datetime.datetime.now(datetime.timezone.utc)
@@ -502,6 +601,8 @@ def render_posting_report(
     if model_routing:
         routing_str = ", ".join(f"{role}: {model}" for role, model in model_routing.items())
         meta_bits.append(f"<span>{_esc(routing_str)}</span>")
+    if dashboard_url:
+        meta_bits.append(f'<span><a class="header__link" href="{_esc(dashboard_url)}">&larr; Back to dashboard</a></span>')
 
     body = f"""<!DOCTYPE html>
 <html lang="en">

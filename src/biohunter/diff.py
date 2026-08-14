@@ -22,7 +22,8 @@ sections would hide exactly that failure mode instead of surfacing it.
 from __future__ import annotations
 
 import difflib
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 
 from .revision import RevisionResult
 from .writer import WriterDraft
@@ -38,12 +39,60 @@ _DIFF_SECTIONS: tuple[tuple[str, str], ...] = (
     ("cover_letter", "Cover Letter"),
 )
 
+# Which sections get word-level diffing vs. line-level. tailored_bullets
+# already has one bullet per line ("- some bullet"), so difflib's normal
+# line-based unified_diff already reads fine there. tailored_summary and
+# cover_letter are prose paragraphs with few or no internal line breaks
+# -- diffing THOSE by line produces one "line" that IS the entire
+# paragraph, so any change at all renders as "the whole paragraph was
+# deleted, the whole new paragraph was added" with no visible word-level
+# distinction (the 2026-08-13 handoff's "long horizontal strings of
+# code" complaint). Word-level diffing actually shows what changed.
+_WORD_DIFF_SECTIONS = {"tailored_summary", "cover_letter"}
+
+# Splits on whitespace while keeping the whitespace as its own token, so
+# re-joining diffed tokens reproduces the original spacing exactly
+# rather than collapsing every gap to a single space.
+_WORD_SPLIT_RE = re.compile(r"\s+|\S+")
+
 
 @dataclass
 class SectionDiff:
     section: str  # display label, e.g. "Tailored Summary"
     changed: bool
-    diff_text: str  # unified diff; "" when changed is False
+    mode: str = "line"  # "line" (diff_text is a unified diff) or "word" (word_ops instead)
+    diff_text: str = ""  # unified diff text; populated when mode == "line" and changed
+    # (tag, token) pairs, tag in {"equal", "delete", "insert"}; populated
+    # when mode == "word" and changed. Tokens already include their own
+    # surrounding whitespace (see _WORD_SPLIT_RE) so "".join(text for
+    # _, text in word_ops) reproduces either side's original spacing.
+    word_ops: list[tuple[str, str]] = field(default_factory=list)
+
+
+def _word_diff_ops(prev_text: str, curr_text: str) -> list[tuple[str, str]]:
+    """Word-level SequenceMatcher diff for prose sections -- see the
+    module-level _WORD_DIFF_SECTIONS comment for why line-diffing a
+    paragraph doesn't produce anything readable. autojunk=False:
+    SequenceMatcher's default autojunk heuristic can misbehave on text
+    with a repeated common word (e.g. "the")  appearing very often,
+    which prose routinely does -- not worth the risk for text this
+    short (a summary paragraph or cover letter, never megabytes)."""
+    prev_tokens = _WORD_SPLIT_RE.findall(prev_text)
+    curr_tokens = _WORD_SPLIT_RE.findall(curr_text)
+    matcher = difflib.SequenceMatcher(a=prev_tokens, b=curr_tokens, autojunk=False)
+
+    ops: list[tuple[str, str]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            ops.append(("equal", "".join(prev_tokens[i1:i2])))
+        elif tag == "delete":
+            ops.append(("delete", "".join(prev_tokens[i1:i2])))
+        elif tag == "insert":
+            ops.append(("insert", "".join(curr_tokens[j1:j2])))
+        elif tag == "replace":
+            ops.append(("delete", "".join(prev_tokens[i1:i2])))
+            ops.append(("insert", "".join(curr_tokens[j1:j2])))
+    return ops
 
 
 @dataclass
@@ -71,9 +120,19 @@ def diff_drafts(
     for attr, label in _DIFF_SECTIONS:
         prev_text = getattr(prev, attr) or ""
         curr_text = getattr(curr, attr) or ""
+        mode = "word" if attr in _WORD_DIFF_SECTIONS else "line"
 
         if prev_text == curr_text:
-            results.append(SectionDiff(section=label, changed=False, diff_text=""))
+            results.append(SectionDiff(section=label, changed=False, mode=mode))
+            continue
+
+        if mode == "word":
+            results.append(
+                SectionDiff(
+                    section=label, changed=True, mode="word",
+                    word_ops=_word_diff_ops(prev_text, curr_text),
+                )
+            )
             continue
 
         diff_lines = difflib.unified_diff(
@@ -84,7 +143,7 @@ def diff_drafts(
             lineterm="",
         )
         results.append(
-            SectionDiff(section=label, changed=True, diff_text="\n".join(diff_lines))
+            SectionDiff(section=label, changed=True, mode="line", diff_text="\n".join(diff_lines))
         )
     return results
 
