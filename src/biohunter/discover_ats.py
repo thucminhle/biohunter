@@ -68,6 +68,7 @@ from playwright.sync_api import sync_playwright
 
 from .detect_ats import _COMPANIES_YAML, _PATTERNS, load_existing
 from .scout.ratelimit import RateLimiter, _USER_AGENT
+from .scout.scraper import _check_greenhouse_url_alive
 
 _DEFAULT_TIMEOUT_MS = 30_000
 _JSON_LIKE_CONTENT_TYPES = ("application/json", "text/json")
@@ -144,22 +145,78 @@ def discover_one(
     endpoint_urls = "\n".join(r.url for r in responses)
     search_space = final_url + "\n" + html + "\n" + endpoint_urls
 
+    dead_matches: list[str] = []
     for ats_type, pattern in _PATTERNS:
         match = pattern.search(search_space)
         if not match:
             continue
-        result["ats_type"] = ats_type
+
         if ats_type == "workday":
             subdomain, site = match.group(1), match.group(2)
-            result["ats_slug"] = f"{subdomain}/{site}"
-            result["careers_url"] = f"https://{subdomain}.myworkdayjobs.com/{site}"
+            candidate_slug = f"{subdomain}/{site}"
+            candidate_careers_url = f"https://{subdomain}.myworkdayjobs.com/{site}"
         else:
-            result["ats_slug"] = match.group(1)
+            candidate_slug = match.group(1)
+            candidate_careers_url = result["careers_url"]
+
+        if ats_type == "greenhouse":
+            # LIVENESS GATE, added 2026-08-15 -- real, confirmed bug: a
+            # fingerprint match only ever proves "a URL of this shape
+            # appears somewhere in the rendered page/HTML/XHR log," never
+            # "the board it points to actually exists right now." Scribe
+            # Therapeutics hit exactly this: its old Greenhouse board
+            # (job-boards.greenhouse.io/scribetherapeutics) 404s for real,
+            # but a stale reference to that URL still lingers somewhere in
+            # scribetx.com/careers's rendered page, so the regex matched
+            # and this got reported [ok] anyway.
+            #
+            # Reuses scraper.py's _check_greenhouse_url_alive() rather
+            # than a new implementation -- it was built for the dead-link
+            # sweep's JOB-detail-page case, but its logic (GET with
+            # redirects; 404/410 -> dead; redirect to ?error=true -> dead;
+            # 200 with no error param -> alive) applies just as correctly
+            # to a board's root/listing URL: Greenhouse 404s a genuinely
+            # nonexistent board slug directly at the root, which is
+            # exactly Scribe's confirmed case and exactly what the
+            # existing 404 branch already catches, with zero changes to
+            # scraper.py needed.
+            #
+            # Only greenhouse is gated here, deliberately -- it's the one
+            # real, confirmed case, and the only platform with a working
+            # checker to reuse. Workday/Jobvite's own checkers in
+            # scraper.py are built around a specific JOB detail URL
+            # (Workday's CXS detail endpoint, Jobvite's redirect check),
+            # not a board root -- reusing them here on a board-root
+            # careers_url would be a guess, not a verified reuse, so
+            # that's left alone rather than half-applied.
+            board_url = f"https://job-boards.greenhouse.io/{candidate_slug}"
+            is_alive, detail = _check_greenhouse_url_alive(board_url, limiter)
+            if is_alive is False:
+                # Confirmed dead -- don't report this as [ok]. Keep
+                # scanning remaining patterns (another platform's
+                # fingerprint could still be a real, separate match), and
+                # fall through to manual review if nothing else matches.
+                dead_matches.append(f"greenhouse/{candidate_slug} (board_url={board_url}): {detail}")
+                continue
+            # True or None (inconclusive: robots.txt block, network error,
+            # a non-404/410/200 status) are both still reported as a
+            # match -- only a CONFIRMED dead result is strong enough to
+            # override a real fingerprint hit. check_url_alive()'s own
+            # docstring in scraper.py explains why inconclusive must never
+            # be treated as dead. The detail string is kept on the result
+            # so main() can surface it either way, not hidden.
+            result["_liveness_check"] = detail
+
+        result["ats_type"] = ats_type
+        result["ats_slug"] = candidate_slug
+        result["careers_url"] = candidate_careers_url
         page.close()
         return result
 
     result["_needs_manual_review"] = True
     result["_candidate_endpoints"] = _capture_candidate_endpoints(responses)
+    if dead_matches:
+        result["_dead_matches"] = dead_matches
     page.close()
     return result
 
@@ -236,14 +293,19 @@ def main() -> None:
                     continue
 
                 if result.get("ats_type"):
-                    print(f"  [ok] {name}: {result['ats_type']} (ats_slug={result['ats_slug']}) -- found via headless render")
+                    liveness_note = f" (liveness check: {result['_liveness_check']})" if result.get("_liveness_check") else ""
+                    print(f"  [ok] {name}: {result['ats_type']} (ats_slug={result['ats_slug']}) -- found via headless render{liveness_note}")
                     detected += 1
                     result.pop("_needs_manual_review", None)
                     result.pop("_candidate_endpoints", None)
+                    result.pop("_liveness_check", None)
                     final.append(result)
                     continue
 
                 print(f"  [manual] {name}: no ATS fingerprint found even after a real render")
+                dead = result.get("_dead_matches") or []
+                for d in dead:
+                    print(f"           [liveness-gate] rejected a fingerprint match confirmed dead: {d}")
                 endpoints = result.get("_candidate_endpoints") or []
                 if endpoints:
                     print(f"           {len(endpoints)} JSON-ish XHR/fetch endpoint(s) seen -- start here for the wizard:")

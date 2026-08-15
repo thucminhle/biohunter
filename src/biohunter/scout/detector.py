@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 
 from ..ats import REGISTRY
 from ..ats.base import RawPosting
+from ..ats.custom_api import CustomAPIAdapter, load_custom_api_config
 from ..config import CompanyConfig, load_companies
 from ..db import get_connection, init_schema
 from . import scraper
@@ -249,6 +250,33 @@ def _mark_stale_postings(conn, company_id: int, run_time: datetime.datetime) -> 
 
 
 
+def _run_ats_fetch(conn, company: CompanyConfig, company_id: int, adapter, run_time: datetime.datetime) -> ScoutResult:
+    """Shared after-fetch bookkeeping for any ATSAdapter -- a REGISTRY
+    singleton or a per-company CustomAPIAdapter, doesn't matter which:
+    upsert postings, stamp last_checked_at, mark stale postings. Pulled
+    out so the new custom_api dispatch branch (see run_scout(), added
+    2026-08-15 per the 'wire CustomAPIAdapter into Scout's dispatch'
+    handoff item) reuses this instead of duplicating it next to the
+    REGISTRY branch.
+
+    `company.ats_slug or company.name` is passed to fetch_postings() even
+    for a CustomAPIAdapter, which ignores it (its own docstring: accepted
+    only to satisfy ATSAdapter's shared interface, since a bound
+    CustomAPIConfig already has the real URL) -- keeping the same call
+    shape for every adapter means this helper doesn't need to know or
+    care which kind it was handed.
+    """
+    postings = adapter.fetch_postings(company.ats_slug or company.name)
+    new_count = _upsert_postings(conn, company_id, postings)
+    conn.execute(
+        "UPDATE companies SET last_checked_at = ? WHERE id = ?",
+        (run_time.isoformat(), company_id),
+    )
+    conn.commit()
+    _mark_stale_postings(conn, company_id, run_time)
+    return ScoutResult(company.name, "ats", new_count, len(postings))
+
+
 def run_scout(
     limiter: RateLimiter | None = None,
     db_path: str | None = None,
@@ -289,15 +317,28 @@ def run_scout(
             if company.ats_type and company.ats_type in REGISTRY:
                 adapter = REGISTRY[company.ats_type]
                 limiter.wait_for_domain(company.careers_url)
-                postings = adapter.fetch_postings(company.ats_slug or company.name)
-                new_count = _upsert_postings(conn, company_id, postings)
-                conn.execute(
-                    "UPDATE companies SET last_checked_at = ? WHERE id = ?",
-                    (run_time.isoformat(), company_id),
-                )
-                conn.commit()
-                _mark_stale_postings(conn, company_id, run_time)
-                result = ScoutResult(company.name, "ats", new_count, len(postings))
+                result = _run_ats_fetch(conn, company, company_id, adapter, run_time)
+                results.append(result)
+                if on_company_done:
+                    on_company_done(result)
+
+            elif company.ats_type == "custom_api":
+                # Per the 2026-08-15 handoff: CustomAPIAdapter is deliberately
+                # NOT in ats/__init__.py's REGISTRY, because (unlike the six
+                # platform adapters) it isn't a stateless singleton -- every
+                # company's URL/pagination/field-mapping is completely
+                # different, not just a slug substitution. So it's built
+                # fresh per company here, from its config/custom_apis.yaml
+                # entry, instead of a REGISTRY lookup. load_custom_api_config()
+                # fails loudly (ValueError) on a missing/malformed entry --
+                # deliberately not caught here specifically, it falls through
+                # to the same broad except Exception below as any other
+                # company's fetch/parse failure, and surfaces as a normal
+                # ScoutResult(strategy="error"), not a crash.
+                config = load_custom_api_config(company.name)
+                adapter = CustomAPIAdapter(config, limiter=limiter)
+                limiter.wait_for_domain(company.careers_url)
+                result = _run_ats_fetch(conn, company, company_id, adapter, run_time)
                 results.append(result)
                 if on_company_done:
                     on_company_done(result)

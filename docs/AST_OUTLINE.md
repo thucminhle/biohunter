@@ -1236,6 +1236,10 @@ def _mark_stale_postings(conn, company_id: int, run_time: datetime.datetime) -> 
     """Mark postings not seen in this company's last STALE_AFTER_DAYS worth"""
     ...
 
+def _run_ats_fetch(conn, company: CompanyConfig, company_id: int, adapter, run_time: datetime.datetime) -> ScoutResult:
+    """Shared after-fetch bookkeeping for any ATSAdapter -- a REGISTRY"""
+    ...
+
 def run_scout(limiter: RateLimiter | None=None, db_path: str | None=None, on_company_done: Callable[[ScoutResult], None] | None=None) -> list[ScoutResult]:
     """One Scout pass over every active company in the registry."""
     ...

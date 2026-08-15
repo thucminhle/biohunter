@@ -42,7 +42,8 @@
 │   │   ├── 2026-08-13_BioHunter-GreenhouseFixConfirmed-RepostTracking-Handoff.md
 │   │   ├── 2026-08-14_1_BioHunter-DeviationControl-ProgressNotify-RoadmapHandoff.md
 │   │   ├── 2026-08-14_2_BioHunter-SubsystemPlanning-ScoutHandoff.md
-│   │   └── 2026-08-15_BioHunter-DiscoverAts-CustomAPIAdapter-Handoff.md
+│   │   ├── 2026-08-15_1_BioHunter-DiscoverAts-CustomAPIAdapter-Handoff.md
+│   │   └── 2026-08-15_2_BioHunter-CustomAPIDispatch-LivenessGate-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md
