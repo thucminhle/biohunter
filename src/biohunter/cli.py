@@ -87,11 +87,34 @@ def keyword_filter_match(text: str, include: list[str], exclude: list[str]) -> b
     three-branch logic cmd_list_postings applied inline to title_lower/
     location_lower before this refactor; behavior is unchanged, only moved
     into a shared, importable function.
+
+    FOURTH BRANCH, added 2026-08-15_3: empty `text` (no data at all, not
+    "checked and didn't match") now skips the `include` check instead of
+    auto-failing it. Root cause: scraper.py's extract_postings() -- the
+    css_selector fallback path -- never populates RawPosting.location at
+    all (title+url only, confirmed against real source), so EVERY
+    css_selector-scraped company's postings (AbbVie, Pacific Biolabs, and
+    any future one) were being silently dropped by any non-empty
+    location_include, regardless of what strings were in it. This is a
+    deliberate stop-gap, not a real fix -- picked as "easiest for now"
+    over actually extracting real location data at scrape time. Explicitly
+    flagged for revisit: the stated longer-term goal is an industry- and
+    location-agnostic app where users add arbitrary companies and the app
+    figures out how to import postings -- at that point "no location data"
+    will be the COMMON case, not an edge case, and silently passing
+    everything through an include filter it can't actually check is not
+    the right permanent behavior (a location_include filter that silently
+    does nothing for an entire class of company is a real footgun once
+    there are many such companies, not just two). The real fix is
+    upstream: give css_selector configs an optional second selector for
+    location text, or otherwise start actually populating
+    RawPosting.location. Revisit before this filter is relied on for
+    anything more consequential than "don't drop AbbVie's 4 CA postings".
     """
     text_lower = (text or "").lower()
     if any(kw in text_lower for kw in exclude):
         return False
-    if include and not any(kw in text_lower for kw in include):
+    if include and text_lower and not any(kw in text_lower for kw in include):
         return False
     return True
 
