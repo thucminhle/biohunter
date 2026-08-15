@@ -18,7 +18,13 @@ For each company:
      Workday fingerprints (many companies embed an ATS board via iframe,
      so the fingerprint often lives in the HTML, not the URL you started
      with -- this is why we search page content, not just the final URL).
-  3. Fills in ats_type/ats_slug automatically on a match.
+  3. Fills in ats_type/ats_slug automatically on a match. If a page links
+     to MORE THAN ONE board for the same platform (e.g. a company running
+     a separate Workday tenant for student/intern hiring alongside its
+     main board), picks whichever doesn't look like a secondary board and
+     prints every other candidate found so it's checkable, not guessed
+     silently -- see _select_best_match()'s docstring for the real case
+     that motivated this.
   4. Leaves ats_type blank + adds a TODO comment for manual css_selector
      setup on no match.
 
@@ -52,9 +58,48 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
     ("jobvite", re.compile(r"jobs\.jobvite\.com/([a-zA-Z0-9_-]+)")),
 ]
 
+# Slug-name keywords that mark a narrower/secondary recruiting site rather
+# than a company's primary board (e.g. some large companies run a separate
+# Workday tenant just for student/intern hiring, alongside their main one).
+# When more than one match for the same platform is found on a single page,
+# a match containing one of these is deprioritized in favor of one that
+# doesn't -- BioHunter's target is full-time professional roles, not
+# internships. This is a heuristic, not a guarantee: it still falls back to
+# the first match found if every candidate is "secondary" (or none is), and
+# every OTHER candidate found is always reported (see _other_candidates
+# below), never silently discarded.
+_SECONDARY_BOARD_KEYWORDS = ("student", "intern", "campus", "graduate")
+
+
+def _select_best_match(pattern: re.Pattern, search_space: str) -> tuple[re.Match | None, list[str]]:
+    """Returns (chosen_match_or_None, [other matched full-text candidates]).
+
+    Real motivating case, not a hypothetical: Agilent's careers page
+    (careers.agilent.com) links to BOTH
+    agilent.wd5.myworkdayjobs.com/Agilent_Careers (the main/experienced
+    board) and .../Agilent_Student_Careers (a separate, narrower one) --
+    plain first-match-wins (the old behavior) silently picked the Student
+    one. Confirmed via a real detect_ats.py run, 2026-08-15.
+    """
+    seen: dict[str, re.Match] = {}
+    for m in pattern.finditer(search_space):
+        seen.setdefault(m.group(0), m)  # de-dup identical matches, keep first occurrence
+    if not seen:
+        return None, []
+    candidates = list(seen.values())
+    if len(candidates) == 1:
+        return candidates[0], []
+    primary = [m for m in candidates if not any(kw in m.group(0).lower() for kw in _SECONDARY_BOARD_KEYWORDS)]
+    chosen = primary[0] if primary else candidates[0]
+    others = [m.group(0) for m in candidates if m is not chosen]
+    return chosen, others
+
 
 def detect_one(name: str, careers_url: str, limiter: RateLimiter) -> dict:
-    """Returns a dict shaped like a companies.yaml entry."""
+    """Returns a dict shaped like a companies.yaml entry. May also include
+    the internal-only key `_other_candidates` (a list of alternate matched
+    strings for the same platform, when more than one was found on the
+    page) -- printed by main(), never written to companies.yaml."""
     result = {"name": name, "careers_url": careers_url, "ats_type": None}
 
     try:
@@ -69,7 +114,7 @@ def detect_one(name: str, careers_url: str, limiter: RateLimiter) -> dict:
         return result
 
     for ats_type, pattern in _PATTERNS:
-        match = pattern.search(search_space)
+        match, other_candidates = _select_best_match(pattern, search_space)
         if not match:
             continue
         result["ats_type"] = ats_type
@@ -79,6 +124,8 @@ def detect_one(name: str, careers_url: str, limiter: RateLimiter) -> dict:
             result["careers_url"] = f"https://{subdomain}.myworkdayjobs.com/{site}"
         else:
             result["ats_slug"] = match.group(1)
+        if other_candidates:
+            result["_other_candidates"] = other_candidates
         return result
 
     result["_needs_manual_review"] = True
@@ -125,6 +172,14 @@ def main() -> None:
         elif result.get("ats_type"):
             print(f"  [ok] {name}: {result['ats_type']} (ats_slug={result['ats_slug']})")
             detected += 1
+            others = result.get("_other_candidates")
+            if others:
+                print(
+                    f"       NOTE: {len(others)} other {result['ats_type']} match(es) also found on this "
+                    f"page -- picked the one that didn't look like a secondary board, verify this is right:"
+                )
+                for other in others:
+                    print(f"         {other}")
         else:
             print(f"  [manual] {name}: no ATS fingerprint found -- add css_selector by hand")
             needs_review += 1
@@ -132,6 +187,7 @@ def main() -> None:
         # Drop internal bookkeeping keys before writing to the yaml file.
         result.pop("_detect_error", None)
         result.pop("_needs_manual_review", None)
+        result.pop("_other_candidates", None)
         final.append(result)
 
     # Preserve any existing companies not present in this input batch.

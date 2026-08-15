@@ -4,6 +4,8 @@
 │   ├── companies.example.yaml
 │   ├── companies.yaml
 │   ├── companies_input.yaml
+│   ├── discover_test_input.yaml
+│   ├── new_companies_batch.yaml
 │   ├── roles.yaml
 │   ├── search_criteria.example.yaml
 │   └── search_criteria.yaml
@@ -38,7 +40,9 @@
 │   │   ├── 2026-08-11_BioHunter-DeadLinkChecker-ATSNuances-Handoff.md
 │   │   ├── 2026-08-13_2_BioHunter-JobsynFixConfirmed-MVPRefocus-Handoff.md
 │   │   ├── 2026-08-13_BioHunter-GreenhouseFixConfirmed-RepostTracking-Handoff.md
-│   │   └── 2026-08-14_1_BioHunter-DeviationControl-ProgressNotify-RoadmapHandoff.md
+│   │   ├── 2026-08-14_1_BioHunter-DeviationControl-ProgressNotify-RoadmapHandoff.md
+│   │   ├── 2026-08-14_2_BioHunter-SubsystemPlanning-ScoutHandoff.md
+│   │   └── 2026-08-15_BioHunter-DiscoverAts-CustomAPIAdapter-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md
@@ -54,6 +58,7 @@
 │       │   ├── __init__.py
 │       │   ├── ashby.py
 │       │   ├── base.py
+│       │   ├── custom_api.py
 │       │   ├── greenhouse.py
 │       │   ├── jobsyn.py
 │       │   ├── jobvite.py
@@ -72,6 +77,7 @@
 │       ├── db.py
 │       ├── detect_ats.py
 │       ├── diff.py
+│       ├── discover_ats.py
 │       ├── drafts_db.py
 │       ├── llm.py
 │       ├── qdrant.py

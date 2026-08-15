@@ -1,0 +1,11 @@
+companies:
+  - name: Agilent
+    careers_url: "https://careers.agilent.com/"
+  - name: AbbVie
+    careers_url: "https://careers.abbvie.com/en/jobs"
+  - name: Tempus AI
+    careers_url: "https://tempus.wd5.myworkdayjobs.com/Tempus_Careers"
+  - name: Addition Therapeutics
+    careers_url: "https://additiontx.com/"
+  - name: Pacific Biolabs
+    careers_url: "https://pacificbiolabs.com/about/career-opportunities-2/"

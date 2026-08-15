@@ -40,6 +40,121 @@ class ATSAdapter(abc.ABC):
 
 ```
 
+## `src/biohunter/ats/custom_api.py`
+```python
+# custom_api.py -- one reviewed ATSAdapter that interprets a per-company
+# field-mapping CONFIG at runtime, rather than one generated adapter class
+# per company.
+#
+# Per docs/ROADMAP.md's Scout & ingestion subsystem: for companies whose
+# career site runs a JSON search API that isn't one of the six known
+# platforms (Greenhouse/Lever/Ashby/Workday/Jobvite/jobsyn), the guided
+# onboarding wizard (not yet built) will let an LLM propose a field mapping
+# -- which JSON keys are title/location/description/url -- from a real
+# sample response the user pastes in from DevTools. What gets saved is
+# that mapping (data, in config/custom_apis.yaml), never freshly generated
+# Python. This module is the one hand-written interpreter for all of those
+# mappings.
+#
+# Real example this schema was designed against: this session's
+# discover_ats.py run found Astellas' real search API at
+# https://prod-search-api.jobsyn.org/api/v1/solr/search?page=1&num_items=10
+# -- confirmed to exist, but its response body was never actually fetched
+# or inspected this session. The sample custom_apis.yaml entry at the
+# bottom of this file's docstring uses that real URL with CLEARLY-MARKED
+# placeholder field names -- do not treat those field names as real without
+# checking an actual response first.
+#
+# ARCHITECTURAL NOTE, worth re-stating since it's easy to miss: unlike the
+# six REGISTRY adapters (ashby.py, greenhouse.py, etc.), which are stateless
+# singletons parametrized only by a short `ats_slug` at call time (because
+# every company on e.g. Greenhouse shares the same URL template),
+# CustomAPIAdapter can't work that way -- every company's URL, pagination,
+# and field names are completely different, not just a slug substitution.
+# So it is NOT added to ats/__init__.py's REGISTRY dict. Building one
+# requires a full CustomAPIConfig at construction time (see
+# load_custom_api_config()), one instance per company. Wiring "if a
+# company's ats_type is custom_api, build one of these instead of a
+# REGISTRY lookup" into Scout's actual per-company dispatch loop is a
+# follow-up step -- it needs scout/__init__.py, which hasn't been uploaded
+# in this session, so it isn't touched here.
+#
+# ---
+# Example config/custom_apis.yaml entry (illustrative field names, marked
+# as such -- the real ones need to come from an actual inspected response):
+#
+#     Astellas:
+#       method: GET
+#       url: "https://prod-search-api.jobsyn.org/api/v1/solr/search"
+#       query_params:
+#         num_items: 50
+#       pagination:
+#         type: page_number
+#         param: page
+#         start_page: 1
+#         max_pages: 20
+#       list_path: "response.docs"        # PLACEHOLDER -- verify against a real response
+#       fields:
+#         title: "job_title"               # PLACEHOLDER
+#         url_template: "https://astellascareers.jobs/job/{raw.job_id}"  # PLACEHOLDER
+#         location: "job_location"         # PLACEHOLDER
+#         description: "job_description"   # PLACEHOLDER
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+_CUSTOM_APIS_YAML = _REPO_ROOT / 'config' / 'custom_apis.yaml'
+_PLACEHOLDER_PATTERN = re.compile('\\{([^}]+)\\}')
+def _resolve_path(obj, dotted_path: str):
+    """Walk a dotted path like 'location.city' or 'response.docs' through"""
+    ...
+
+def _render_url_template(template: str, item: dict) -> str | None:
+    """Resolves `{raw.<dot.path>}` placeholders in a URL template against"""
+    ...
+
+class FieldMap:
+    """Which JSON key (dot-path) inside each posting-item object maps to"""
+    title: str
+    url: str | None = None
+    url_template: str | None = None
+    location: str | None = None
+    description: str | None = None
+
+class PaginationConfig:
+    type: str = 'none'
+    param: str = 'page'
+    start_page: int = 1
+    max_pages: int = 20
+
+class CustomAPIConfig:
+    company_name: str
+    method: str
+    url: str
+    fields: FieldMap
+    query_params: dict = dataclasses.field(default_factory=dict)
+    json_body: dict | None = None
+    pagination: PaginationConfig = dataclasses.field(default_factory=PaginationConfig)
+    list_path: str = ''
+
+def load_custom_api_config(company_name: str, path: pathlib.Path=_CUSTOM_APIS_YAML) -> CustomAPIConfig:
+    """Loads one company's mapping config from config/custom_apis.yaml."""
+    ...
+
+class CustomAPIAdapter(ATSAdapter):
+    """One reviewed adapter, driven entirely by a CustomAPIConfig bound at"""
+    name = 'custom_api'
+    def __init__(self, config: CustomAPIConfig, limiter: RateLimiter | None=None):
+        ...
+
+    def fetch_postings(self, ats_slug: str) -> list[RawPosting]:
+        """`ats_slug` is accepted only to satisfy ATSAdapter's shared"""
+        ...
+
+    def _item_to_posting(self, item: dict) -> RawPosting:
+        ...
+
+
+```
+
 ## `src/biohunter/ats/greenhouse.py`
 ```python
 _USER_AGENT = 'BioHunter/0.1 (personal job-search tool; contact: set-your-email-here)'
@@ -509,7 +624,13 @@ def _split_statements(sql: str) -> list[str]:
 #      Workday fingerprints (many companies embed an ATS board via iframe,
 #      so the fingerprint often lives in the HTML, not the URL you started
 #      with -- this is why we search page content, not just the final URL).
-#   3. Fills in ats_type/ats_slug automatically on a match.
+#   3. Fills in ats_type/ats_slug automatically on a match. If a page links
+#      to MORE THAN ONE board for the same platform (e.g. a company running
+#      a separate Workday tenant for student/intern hiring alongside its
+#      main board), picks whichever doesn't look like a secondary board and
+#      prints every other candidate found so it's checkable, not guessed
+#      silently -- see _select_best_match()'s docstring for the real case
+#      that motivated this.
 #   4. Leaves ats_type blank + adds a TODO comment for manual css_selector
 #      setup on no match.
 #
@@ -519,8 +640,13 @@ def _split_statements(sql: str) -> list[str]:
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _COMPANIES_YAML = _REPO_ROOT / 'config' / 'companies.yaml'
 _PATTERNS: list[tuple[str, re.Pattern]] = [('greenhouse', re.compile('(?:job-)?boards(?:-api)?\\.greenhouse\\.io/(?:v1/boards/)?([a-zA-Z0-9_-]+)')), ('lever', re.compile('jobs\\.lever\\.co/([a-zA-Z0-9_-]+)')), ('ashby', re.compile('jobs\\.ashbyhq\\.com/([a-zA-Z0-9_-]+)')), ('workday', re.compile('([a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+)\\.myworkdayjobs\\.com/([a-zA-Z0-9_-]+)')), ('jobvite', re.compile('jobs\\.jobvite\\.com/([a-zA-Z0-9_-]+)'))]
+_SECONDARY_BOARD_KEYWORDS = ('student', 'intern', 'campus', 'graduate')
+def _select_best_match(pattern: re.Pattern, search_space: str) -> tuple[re.Match | None, list[str]]:
+    """Returns (chosen_match_or_None, [other matched full-text candidates])."""
+    ...
+
 def detect_one(name: str, careers_url: str, limiter: RateLimiter) -> dict:
-    """Returns a dict shaped like a companies.yaml entry."""
+    """Returns a dict shaped like a companies.yaml entry. May also include"""
     ...
 
 def load_input(path: pathlib.Path) -> list[dict]:
@@ -581,6 +707,87 @@ def diff_drafts(prev: WriterDraft, curr: WriterDraft, from_label: str='before', 
 
 def diff_revision_result(result: RevisionResult) -> list[RoundDiff]:
     """Diffs every consecutive pair of rounds in a RevisionResult."""
+    ...
+
+```
+
+## `src/biohunter/discover_ats.py`
+```python
+# discover_ats.py -- headless-browser ATS discovery for JS-rendered career pages.
+#
+# Per ADR-0003 and docs/ROADMAP.md's Scout & ingestion subsystem (step 2 of
+# the guided company onboarding chain): detect_ats.py's plain requests.get()
+# fingerprint scan only ever sees whatever ships in the *initial* HTML
+# response. Companies whose careers page renders its ATS iframe/link via
+# client-side JS -- confirmed real cases this project has already hit:
+# Scribe Therapeutics (scribetx.com/careers -- Webflow CMS, empty
+# placeholder in static HTML) and Astellas (astellascareers.jobs --
+# NLX-backed, same client-render problem) -- never show a fingerprint to
+# detect_ats.py at all, regardless of whether they're actually running a
+# known ATS underneath.
+#
+# This module re-runs the SAME fingerprint patterns detect_ats.py already
+# defines (imported from there, not duplicated) against a page that's been
+# given a real headless-Chromium render first, plus every XHR/fetch
+# response URL observed while that render happened -- catching cases where
+# the fingerprint only ever appears in a background network call, not the
+# final DOM (e.g. an iframe whose src is set by JS after load).
+#
+# No new dependency: Playwright is already required by resume_pdf.py
+# (`pip install playwright && playwright install chromium`), and this
+# module reuses that same installed browser.
+#
+# USAGE:
+#     # Default: re-scan every company in config/companies.yaml that
+#     # detect_ats.py already tried and left with ats_type: null. This is
+#     # the normal way to run this -- it picks up exactly where
+#     # detect_ats.py left off, no extra config needed.
+#     python -m biohunter.discover_ats
+#
+#     # Or, same shape as detect_ats.py, scan a fresh input batch instead:
+#     python -m biohunter.discover_ats --input config/companies_input.yaml
+#
+# Companies that still don't match ANY known ATS after a real render are
+# printed with every likely-JSON XHR/fetch endpoint seen during page load
+# -- this is exactly the DevTools Network-tab list a human would need to
+# hand-build the next stage (the guided extraction wizard, not yet built),
+# given for free since the browser already rendered the page once here.
+# These diagnostics are console-only -- never written into companies.yaml,
+# which keeps the same shape it already has (see main()).
+#
+# DELIBERATE DIVERGENCE from detect_ats.py, named explicitly rather than
+# left implicit: this module DOES check robots.txt before rendering, where
+# detect_ats.py's plain GET currently does not. A full headless render
+# (loading every sub-resource a real browser would) is a meaningfully
+# heavier request than one GET, so it gets the more cautious check.
+# detect_ats.py itself is unchanged -- worth revisiting there separately if
+# it matters, not fixed here.
+#
+# KNOWN LIMITATION, not solved here: this does not attempt scroll-triggered
+# or click-triggered lazy loading (e.g. a "Load more jobs" button that only
+# fires its own XHR on click). If a company's fingerprint still isn't
+# visible after one real render + networkidle wait, it falls through to
+# manual review the same as it does today. Worth revisiting if that turns
+# out to be a common case, not assumed to be one yet.
+
+_DEFAULT_TIMEOUT_MS = 30000
+_JSON_LIKE_CONTENT_TYPES = ('application/json', 'text/json')
+def _capture_candidate_endpoints(responses: list[Response]) -> list[str]:
+    """Every XHR/fetch response that looks like it might carry job data,"""
+    ...
+
+def discover_one(name: str, careers_url: str, limiter: RateLimiter, browser, timeout_ms: int=_DEFAULT_TIMEOUT_MS) -> dict:
+    """Same return shape as detect_ats.py's detect_one(), plus an optional"""
+    ...
+
+def _pending_from_companies_yaml() -> list[dict]:
+    """Default input source: every company already in companies.yaml with"""
+    ...
+
+def load_input(path: pathlib.Path) -> list[dict]:
+    ...
+
+def main() -> None:
     ...
 
 ```
@@ -1039,6 +1246,7 @@ def run_scout(limiter: RateLimiter | None=None, db_path: str | None=None, on_com
 ```python
 MIN_SECONDS_BETWEEN_REQUESTS_SAME_DOMAIN = 2.0
 _USER_AGENT = 'BioHunter/0.1 (personal job-search tool; contact: set-your-email-here)'
+_ROBOTS_FETCH_TIMEOUT = 10
 class RateLimiter:
     def __init__(self, min_interval: float=MIN_SECONDS_BETWEEN_REQUESTS_SAME_DOMAIN):
         ...
