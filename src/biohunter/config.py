@@ -48,6 +48,16 @@ class CompanyConfig:
     ats_slug: str | None = None
     css_selector: str | None = None
     renderer: str | None = None  # None (default, plain requests) | "playwright"
+    # Added 2026-08-15: css_selector-scraped companies' listing page only
+    # ever yields title+url (see scraper.py's extract_postings() -- no
+    # description in that shape, confirmed by real score-postings run
+    # skipping every AbbVie posting for "no job description stored").
+    # This selector, applied to each posting's OWN url (a second request,
+    # per-posting), is what backfills postings.description for exactly
+    # that case. None (the default) preserves today's title/url-only
+    # behavior for any company that hasn't had one set -- this is
+    # additive, not a behavior change for existing css_selector configs.
+    description_css_selector: str | None = None
 
 
 def load_companies() -> list[CompanyConfig]:
@@ -68,6 +78,7 @@ def load_companies() -> list[CompanyConfig]:
                 ats_type=entry.get("ats_type"),
                 ats_slug=entry.get("ats_slug"),
                 css_selector=entry.get("css_selector"),
+                description_css_selector=entry.get("description_css_selector"),
             )
         )
     return companies

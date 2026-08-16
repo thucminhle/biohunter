@@ -327,6 +327,7 @@ class CompanyConfig:
     ats_slug: str | None = None
     css_selector: str | None = None
     renderer: str | None = None
+    description_css_selector: str | None = None
 
 def load_companies() -> list[CompanyConfig]:
     ...
@@ -1236,6 +1237,10 @@ def _mark_stale_postings(conn, company_id: int, run_time: datetime.datetime) -> 
     """Mark postings not seen in this company's last STALE_AFTER_DAYS worth"""
     ...
 
+def _backfill_missing_descriptions(conn, company: CompanyConfig, company_id: int, limiter: RateLimiter) -> int:
+    """css_selector companies only: extract_postings() never sets"""
+    ...
+
 def _run_ats_fetch(conn, company: CompanyConfig, company_id: int, adapter, run_time: datetime.datetime) -> ScoutResult:
     """Shared after-fetch bookkeeping for any ATSAdapter -- a REGISTRY"""
     ...
@@ -1267,7 +1272,12 @@ class RateLimiter:
 
 ## `src/biohunter/scout/scraper.py`
 ```python
+logger = logging.getLogger(__name__)
 def fetch_page(url: str, limiter: RateLimiter) -> str:
+    ...
+
+def fetch_job_description(url: str, css_selector: str, limiter: RateLimiter) -> str | None:
+    """Fetches ONE job's own detail page (the URL already captured by"""
     ...
 
 def content_hash(html: str) -> str:

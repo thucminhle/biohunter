@@ -44,7 +44,8 @@
 │   │   ├── 2026-08-14_2_BioHunter-SubsystemPlanning-ScoutHandoff.md
 │   │   ├── 2026-08-15_1_BioHunter-DiscoverAts-CustomAPIAdapter-Handoff.md
 │   │   ├── 2026-08-15_2_BioHunter-CustomAPIDispatch-LivenessGate-Handoff.md
-│   │   └── 2026-08-15_3_BioHunter-CustomAPIVerified-AbbVieGeoFilter-PacificBiolabsFix-Handoff.md
+│   │   ├── 2026-08-15_3_BioHunter-CustomAPIVerified-AbbVieGeoFilter-PacificBiolabsFix-Handoff.md
+│   │   └── 2026-08-15_5_BioHunter-AbbVieBayAreaFix-PaginationRootCauseParked-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import urllib.parse
 
 import requests
@@ -8,6 +9,8 @@ from bs4 import BeautifulSoup
 
 from ..ats.base import RawPosting
 from .ratelimit import RateLimiter, _USER_AGENT
+
+logger = logging.getLogger(__name__)
 
 
 def fetch_page(url: str, limiter: RateLimiter) -> str:
@@ -17,6 +20,64 @@ def fetch_page(url: str, limiter: RateLimiter) -> str:
     resp = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=15)
     resp.raise_for_status()
     return resp.text
+
+
+def fetch_job_description(url: str, css_selector: str, limiter: RateLimiter) -> str | None:
+    """Fetches ONE job's own detail page (the URL already captured by
+    extract_postings() off the listing page) and returns the RAW inner
+    HTML of the matched description container -- deliberately NOT parsed
+    down to plain text here. detector.py's _clean_description() already
+    handles that centrally for every ATS adapter's HTML output (br/li/p/
+    div/heading-aware, COALESCE-safe); returning raw HTML lets a
+    css_selector company's description go through that exact same single
+    cleanup path instead of a second, parallel text-extraction routine
+    that could drift from it over time.
+
+    Deliberately returns None on ANY failure rather than raising --
+    request error, non-200, or a selector that matches nothing. Mirrors
+    the established real pattern already live in ats/workday.py and
+    ats/jobvite.py's own description fetches (confirmed via this
+    session's real `run-scout` output: "[workday] description fetch
+    failed for URL -- leaving description unset for this posting").
+    One job's description failing must never abort the company's whole
+    Scout pass -- the caller (detector.py's backfill loop) simply skips
+    this posting and tries the rest; the listing-level title/url/status
+    for this posting is completely unaffected either way.
+
+    Uses the SAME robots-check + rate-limit + real _USER_AGENT request
+    fetch_page() already uses -- this is a second real HTTP request
+    against the SAME company domain fetch_page() just hit for the
+    listing page, so it must go through the identical politeness gate,
+    not a shortcut.
+    """
+    if not limiter.allowed_by_robots(url):
+        logger.warning(
+            "[scrape] robots.txt disallows fetching description at %s -- "
+            "leaving description unset for this posting", url,
+        )
+        return None
+    limiter.wait_for_domain(url)
+    try:
+        resp = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning(
+            "[scrape] description fetch failed for %s -- leaving description "
+            "unset for this posting (title/location/URL are unaffected): %s",
+            url, exc,
+        )
+        return None
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    el = soup.select_one(css_selector)
+    if el is None:
+        logger.warning(
+            "[scrape] description_css_selector %r matched nothing on %s -- "
+            "leaving description unset for this posting; selector may need "
+            "review (e.g. site template changed)", css_selector, url,
+        )
+        return None
+    return el.decode_contents()
 
 
 def content_hash(html: str) -> str:

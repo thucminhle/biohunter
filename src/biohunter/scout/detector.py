@@ -250,6 +250,73 @@ def _mark_stale_postings(conn, company_id: int, run_time: datetime.datetime) -> 
 
 
 
+def _backfill_missing_descriptions(
+    conn, company: CompanyConfig, company_id: int, limiter: RateLimiter
+) -> int:
+    """css_selector companies only: extract_postings() never sets
+    description (title+url from the listing page only -- confirmed both
+    by reading scraper.py's real source and by a real score-postings run
+    that skipped all 4 of AbbVie's postings for "no job description
+    stored"). This is the backfill: one extra request PER POSTING, to
+    that posting's own url (already captured), through
+    company.description_css_selector.
+
+    FETCH-ONCE, NOT EVERY RUN -- deliberate, per this session's explicit
+    call: only rows where description IS NULL are touched. Unlike
+    _upsert_postings()'s COALESCE-on-every-sighting behavior for ATS
+    adapters (which already have the description bundled into their
+    normal listing/detail API calls, so re-fetching costs nothing extra),
+    a css_selector company's description costs a REAL SECOND REQUEST to a
+    small company's own server, every posting, every run -- exactly the
+    kind of traffic that already tripped Pacific Biolabs' bot-blocking
+    this session (see the open-items note on that 403). Fetching once and
+    never again is the safer default until/unless that trade-off is
+    revisited. KNOWN CONSEQUENCE, stated rather than hidden: a company
+    that edits a live posting's text after first-seen will NOT get that
+    edit pulled in under this scheme -- description will just stay
+    whatever it was on first successful fetch.
+
+    Runs UNCONDITIONALLY (not gated on the listing page's content_hash
+    having changed) -- a posting can easily have description IS NULL
+    (first-seen before this feature existed, or its own fetch failed
+    last time) on a run where the listing page itself is byte-identical
+    to last time. Gating this on `changed` would silently skip exactly
+    the postings it exists to catch.
+
+    No-op (returns 0 immediately) if company.description_css_selector
+    isn't configured -- existing title/url-only behavior is completely
+    unchanged for any company that hasn't had one set yet.
+
+    Each posting's fetch failure (network error, non-200, selector
+    matching nothing) is fully isolated -- scraper.fetch_job_description()
+    returns None and logs its own WARNING with the real reason; this loop
+    just moves on to the next posting. One bad selector or one dead job
+    URL must never abort backfill for the rest of this company's postings,
+    same "one failure doesn't take down the whole run" principle as
+    run_scout()'s own outer try/except.
+    """
+    if not company.description_css_selector:
+        return 0
+    rows = conn.execute(
+        "SELECT id, url FROM postings WHERE company_id = ? AND description IS NULL",
+        (company_id,),
+    ).fetchall()
+    updated = 0
+    for posting_id, url in rows:
+        raw_html = scraper.fetch_job_description(url, company.description_css_selector, limiter)
+        if raw_html is None:
+            continue
+        description = _clean_description(raw_html)
+        if description:
+            conn.execute(
+                "UPDATE postings SET description = ? WHERE id = ?", (description, posting_id)
+            )
+            updated += 1
+    if updated:
+        conn.commit()
+    return updated
+
+
 def _run_ats_fetch(conn, company: CompanyConfig, company_id: int, adapter, run_time: datetime.datetime) -> ScoutResult:
     """Shared after-fetch bookkeeping for any ATSAdapter -- a REGISTRY
     singleton or a per-company CustomAPIAdapter, doesn't matter which:
@@ -383,6 +450,11 @@ def run_scout(
                 )
                 conn.commit()
                 _mark_stale_postings(conn, company_id, run_time)
+                # Runs every pass, regardless of `changed` above -- see
+                # _backfill_missing_descriptions()'s own docstring for why
+                # gating this on the listing-page hash would silently skip
+                # postings whose description fetch never succeeded yet.
+                _backfill_missing_descriptions(conn, company, company_id, limiter)
                 result = ScoutResult(company.name, "scrape", new_count, new_count)
                 results.append(result)
                 if on_company_done:
