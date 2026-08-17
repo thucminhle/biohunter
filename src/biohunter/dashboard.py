@@ -445,14 +445,14 @@ def _run_dead_link_check_job(job_id: str, posting_rows: list[tuple]) -> None:
 def _get_posting(conn, posting_id: int) -> dict | None:
     row = conn.execute(
         """SELECT postings.id, companies.name, postings.title, postings.location,
-                  postings.url, postings.description, postings.status
+                  postings.url, postings.apply_url, postings.description, postings.status
            FROM postings JOIN companies ON postings.company_id = companies.id
            WHERE postings.id = ?""",
         (posting_id,),
     ).fetchone()
     if row is None:
         return None
-    keys = ("id", "company", "title", "location", "url", "description", "status")
+    keys = ("id", "company", "title", "location", "url", "apply_url", "description", "status")
     return dict(zip(keys, row))
 
 
@@ -719,7 +719,18 @@ def _filters_query_string(filters: dict, **overrides) -> str:
 
 
 def _distinct_companies(conn) -> list[str]:
-    rows = conn.execute("SELECT DISTINCT name FROM companies ORDER BY name").fetchall()
+    # INNER JOIN, not a plain SELECT DISTINCT on companies -- a company
+    # with zero postings (e.g. one created by a manual/extension capture
+    # whose only posting was later deleted) should just disappear from
+    # this filter dropdown on its own, rather than needing an explicit
+    # "delete company" action. A company with any posting still shows,
+    # even if that posting is status='stale', same as before this change.
+    rows = conn.execute(
+        """SELECT DISTINCT companies.name
+           FROM companies
+           INNER JOIN postings ON postings.company_id = companies.id
+           ORDER BY companies.name"""
+    ).fetchall()
     return [r[0] for r in rows]
 
 
@@ -914,10 +925,15 @@ def posting_detail(posting_id):
         abort(404)
     draft = drafts_db.get_latest_draft(conn, posting_id)
 
+    apply_link = (
+        f' &middot; <a href="{_esc(posting["apply_url"])}" target="_blank"><strong>apply here</strong></a>'
+        if posting.get("apply_url")
+        else ""
+    )
     header = f"""<div class="detail-header">
   <h1>{_esc(posting['title'])}</h1>
   <p class="sub">{_esc(posting['company'])} &middot; {_esc(posting['location'] or 'Location n/a')}
-  &middot; <a href="{_esc(posting['url'])}" target="_blank">original posting</a></p>
+  &middot; <a href="{_esc(posting['url'])}" target="_blank">original posting</a>{apply_link}</p>
 </div>
 <form method="post" action="{url_for('mark_stale_route')}" class="inline-form" style="margin-top:8px;">
   <input type="hidden" name="posting_id" value="{posting_id}">
@@ -1470,6 +1486,67 @@ def _find_or_create_company_light(conn, name: str, fallback_url: str) -> int:
     return row[0]
 
 
+# ---------------------------------------------------------------------------
+# Shared manual-posting-creation logic, factored out 2026-08-16 so the
+# existing HTML form route (posting_manual_create, unchanged in behavior)
+# and the new JSON capture route (api_postings_capture, for the planned
+# browser extension) share one insert/dedup implementation rather than two
+# copies that could silently drift apart. Same dedup semantics as Scout's
+# own _upsert_postings() (re-sighting an existing (company_id, url) pair
+# is a no-op, not an error), same company-fallback rule as before
+# (careers_url defaults to the posting's own URL, never a guessed one).
+# ---------------------------------------------------------------------------
+
+
+def _create_manual_posting(
+    conn,
+    *,
+    company_name: str,
+    title: str,
+    url: str,
+    location: str | None,
+    description: str,
+    apply_url: str | None = None,
+) -> tuple[str, int]:
+    """Create (or find) a manually-captured posting.
+
+    apply_url is the direct link to actually apply for THIS specific
+    posting -- e.g. LinkedIn shows an "apply on company site" link
+    distinct from the LinkedIn job URL itself, and that's genuinely the
+    more important link since it's what someone clicks to apply, not the
+    LinkedIn page url stores for dedup purposes. Stored on the posting
+    itself (postings.apply_url) and rendered on its detail page.
+
+    Secondarily, when a NEW company row is being created and apply_url is
+    provided, it's also used as that company's careers_url fallback
+    (better than the LinkedIn url as a stand-in). Has no effect when the
+    company already exists -- an existing company's careers_url is never
+    silently overwritten by a later capture, since a wrong/stale link
+    typed into one job's capture shouldn't clobber a value Scout may
+    already depend on.
+
+    Returns (status, posting_id) where status is "created" if a new row
+    was inserted, or "duplicate" if a posting with this (company, url)
+    already existed -- caller decides how to present either case.
+    """
+    fallback = apply_url.strip() if apply_url and apply_url.strip() else url
+    company_id = _find_or_create_company_light(conn, company_name, fallback_url=fallback)
+
+    existing = conn.execute(
+        "SELECT id FROM postings WHERE company_id = ? AND url = ?", (company_id, url)
+    ).fetchone()
+    if existing:
+        return "duplicate", existing[0]
+
+    cur = conn.execute(
+        """INSERT INTO postings (company_id, title, url, apply_url, location, description, status)
+           VALUES (?, ?, ?, ?, ?, ?, 'new')""",
+        (company_id, title, url, (apply_url or None), location, description),
+    )
+    conn.commit()
+    return "created", cur.lastrowid
+
+
 @app.route("/postings/manual")
 def posting_manual_form():
     body = f"""<div class="dash-wrap">
@@ -1511,26 +1588,82 @@ def posting_manual_create():
         body = '<div class="dash-wrap"><p>Company, title, URL, and job description are all required.</p></div>'
         return _page("Error", body), 400
 
-    company_id = _find_or_create_company_light(conn, company_name, fallback_url=url)
-
-    existing = conn.execute(
-        "SELECT id FROM postings WHERE company_id = ? AND url = ?", (company_id, url)
-    ).fetchone()
-    if existing:
-        # Same URL already stored for this company -- treat resubmission as
-        # "take me to the one I already have" rather than erroring on the
-        # UNIQUE(company_id, url) constraint, matching _upsert_postings()'s
-        # own re-sighting semantics in scout/detector.py.
-        return redirect(url_for("posting_detail", posting_id=existing[0]))
-
-    cur = conn.execute(
-        """INSERT INTO postings (company_id, title, url, location, description, status)
-           VALUES (?, ?, ?, ?, ?, 'new')""",
-        (company_id, title, url, location, description),
+    # status is "created" or "duplicate" -- the HTML form route doesn't
+    # need to distinguish them in its response, same behavior as before
+    # this was factored out: either way, land on that posting's page.
+    _status, posting_id = _create_manual_posting(
+        conn,
+        company_name=company_name,
+        title=title,
+        url=url,
+        location=location,
+        description=description,
     )
-    conn.commit()
-    posting_id = cur.lastrowid
     return redirect(url_for("posting_detail", posting_id=posting_id))
+
+
+# ---------------------------------------------------------------------------
+# JSON capture endpoint for the planned browser extension (see
+# docs/ROADMAP.md's "Browser extension capture" item). Same underlying
+# _create_manual_posting() as the HTML form above -- this route only
+# differs in speaking JSON in and out instead of an HTML form/redirect,
+# since an extension's background script needs a machine-readable result
+# (posting_id + a URL to open), not a page to parse.
+#
+# No new auth here: this project's whole dashboard is already documented
+# as no-auth/localhost-only by design (see this module's top docstring),
+# and an extension's background service worker reaching 127.0.0.1 is the
+# same "something running on your own machine" case that model already
+# covers -- not a new exposure. If the dashboard is ever bound to
+# something other than localhost, this endpoint (and the rest of the
+# dashboard) would need real auth added, but that's an existing project-
+# wide gap, not specific to this route.
+# ---------------------------------------------------------------------------
+
+
+@app.route("/api/postings/capture", methods=["POST"])
+def api_postings_capture():
+    conn = get_connection()
+    init_schema(conn)
+
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return jsonify({"status": "error", "error": "Request body must be JSON."}), 400
+
+    company_name = (payload.get("company") or "").strip()
+    title = (payload.get("title") or "").strip()
+    url = (payload.get("url") or "").strip()
+    location = (payload.get("location") or "").strip() or None
+    description = (payload.get("description") or "").strip()
+    apply_url = (payload.get("apply_url") or "").strip() or None
+
+    if not (company_name and title and url and description):
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "error": "company, title, url, and description are all required.",
+                }
+            ),
+            400,
+        )
+
+    status, posting_id = _create_manual_posting(
+        conn,
+        company_name=company_name,
+        title=title,
+        url=url,
+        location=location,
+        description=description,
+        apply_url=apply_url,
+    )
+    return jsonify(
+        {
+            "status": status,
+            "posting_id": posting_id,
+            "dashboard_url": url_for("posting_detail", posting_id=posting_id),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------

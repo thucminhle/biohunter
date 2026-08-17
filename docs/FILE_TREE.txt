@@ -1,5 +1,19 @@
 # Repository File Tree
 
+├── biohunter-extension
+│   ├── icons
+│   │   ├── icon128.png
+│   │   ├── icon16.png
+│   │   └── icon48.png
+│   ├── background.js
+│   ├── capture.html
+│   ├── capture.js
+│   ├── linkedin_extract.js
+│   ├── manifest.json
+│   ├── options.html
+│   ├── options.js
+│   ├── popup.html
+│   └── popup.js
 ├── config
 │   ├── companies.example.yaml
 │   ├── companies.yaml
@@ -46,7 +60,8 @@
 │   │   ├── 2026-08-15_2_BioHunter-CustomAPIDispatch-LivenessGate-Handoff.md
 │   │   ├── 2026-08-15_3_BioHunter-CustomAPIVerified-AbbVieGeoFilter-PacificBiolabsFix-Handoff.md
 │   │   ├── 2026-08-15_4_BioHunter-DescriptionBackfill-ScorePostingsConfirmedLive-Handoff.md
-│   │   └── 2026-08-15_5_BioHunter-AbbVieBayAreaFix-PaginationRootCauseParked-Handoff.md
+│   │   ├── 2026-08-15_5_BioHunter-AbbVieBayAreaFix-PaginationRootCauseParked-Handoff.md
+│   │   └── 2026-08-17_BioHunter-ExtensionCaptureLive-LLMExtractionScoped-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md
@@ -103,6 +118,7 @@
 ├── check_schema.py
 ├── debug_posting_622.py
 ├── LICENSE
+├── migrate_add_apply_url.py
 ├── migrate_repost_tracking.py
 ├── pyproject.toml
 ├── README.md

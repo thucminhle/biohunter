@@ -563,10 +563,17 @@ def posting_cover_letter_pdf(posting_id):
 def _find_or_create_company_light(conn, name: str, fallback_url: str) -> int:
     ...
 
+def _create_manual_posting(conn, company_name: str, title: str, url: str, location: str | None, description: str, apply_url: str | None=None) -> tuple[str, int]:
+    """Create (or find) a manually-captured posting."""
+    ...
+
 def posting_manual_form():
     ...
 
 def posting_manual_create():
+    ...
+
+def api_postings_capture():
     ...
 
 def settings_page():
