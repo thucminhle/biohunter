@@ -12,6 +12,26 @@
 // a second layer of protection on top of the window no longer
 // auto-closing -- if you close the window by hand mid-fill, reopening
 // it (same LinkedIn tab) brings back exactly what you had.
+//
+// *** Easy Apply handling (2026-08-17) ***
+// linkedin_extract.js returns an `applyType` field alongside `applyUrl`
+// ("external" | "easy_apply" | "none"), confirmed live on two real
+// postings (see linkedin_extract.js's own header comment). When a
+// posting uses LinkedIn's Easy Apply, there is no real company URL to
+// save -- applyUrl comes back blank on purpose, and the field's
+// placeholder text is set here to say so explicitly, so a blank field
+// reads as "confirmed no link exists" rather than "extraction may have
+// failed here too".
+//
+// *** Auto-close on capture (2026-08-17) ***
+// Previously stayed open after a successful capture, showing a link to
+// the posting's dashboard page. User doesn't need that link at capture
+// time (can find the posting in the dashboard later), and wants the
+// window out of the way immediately -- so this now shows a brief
+// confirmation, then closes itself (background.js's onRemoved listener
+// already resets its captureWindowId tracking however the window closes,
+// so this doesn't need any change on that end). Only successful and
+// duplicate captures auto-close; errors stay open so they're not missed.
 
 const fields = {
   company: document.getElementById("company"),
@@ -25,12 +45,31 @@ const sourceNote = document.getElementById("source-note");
 const statusEl = document.getElementById("status");
 const captureBtn = document.getElementById("captureBtn");
 
+const DEFAULT_APPLY_PLACEHOLDER = fields.applyUrl.placeholder;
+
+// How long to show the "Captured!" confirmation before the window closes
+// itself. Long enough to register as real feedback, short enough not to
+// feel like it's lingering.
+const AUTO_CLOSE_DELAY_MS = 900;
+
 const params = new URLSearchParams(window.location.search);
 const tabId = parseInt(params.get("tabId"), 10);
 const draftKey = `draft_${tabId}`;
 
 function isLinkedInJobPage(url) {
   return /linkedin\.com\/jobs\/(view|collections)/.test(url || "");
+}
+
+// Sets the apply-link field's placeholder based on what extraction found,
+// so an empty field communicates WHY it's empty instead of looking broken.
+function applyApplyTypeNote(applyType) {
+  if (applyType === "easy_apply") {
+    fields.applyUrl.placeholder = "This posting uses LinkedIn Easy Apply — no external link exists";
+  } else if (applyType === "none") {
+    fields.applyUrl.placeholder = "No Apply button detected — paste the link by hand if you have one";
+  } else {
+    fields.applyUrl.placeholder = DEFAULT_APPLY_PLACEHOLDER;
+  }
 }
 
 function currentValues() {
@@ -89,6 +128,15 @@ async function init() {
         fields.description.value = result.description || "";
         fields.url.value = result.url || tab.url;
         fields.applyUrl.value = result.applyUrl || "";
+        applyApplyTypeNote(result.applyType);
+
+        if (result.applyType === "easy_apply") {
+          sourceNote.textContent =
+            "LinkedIn detected — auto-filled below. This posting uses Easy Apply, so there's no external application link to save (that's expected, not a missing field).";
+        } else {
+          sourceNote.textContent =
+            "LinkedIn detected — auto-filled below. Double-check location and description before saving.";
+        }
       }
     } catch (err) {
       sourceNote.textContent =
@@ -127,18 +175,23 @@ captureBtn.addEventListener("click", async () => {
   chrome.runtime.sendMessage({ type: "CAPTURE_POSTING", payload }, (response) => {
     captureBtn.disabled = false;
     if (!response || !response.ok) {
+      // Error -- leave the window open so the message isn't missed, and
+      // so the user can retry without having to redo the whole capture.
       statusEl.className = "error";
       statusEl.textContent = (response && response.error) || "Unknown error.";
       return;
     }
-    statusEl.className = "ok";
-    const label = response.status === "duplicate" ? "Already captured — " : "Captured! ";
-    statusEl.innerHTML =
-      label + `<a href="${response.dashboardUrl}" target="_blank">Open in BioHunter</a>`;
 
-    // Successful capture -- clear the draft so a later re-open of this
-    // tab starts fresh instead of showing stale, already-submitted data.
+    // Success (or duplicate) -- clear the draft immediately so a later
+    // re-open of this tab starts fresh instead of showing stale,
+    // already-submitted data, then show a brief confirmation and close.
     chrome.storage.session.remove(draftKey);
+
+    statusEl.className = "ok";
+    statusEl.textContent =
+      response.status === "duplicate" ? "Already captured — closing…" : "Captured! Closing…";
+
+    setTimeout(() => window.close(), AUTO_CLOSE_DELAY_MS);
   });
 });
 

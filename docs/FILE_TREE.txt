@@ -61,6 +61,7 @@
 │   │   ├── 2026-08-15_3_BioHunter-CustomAPIVerified-AbbVieGeoFilter-PacificBiolabsFix-Handoff.md
 │   │   ├── 2026-08-15_4_BioHunter-DescriptionBackfill-ScorePostingsConfirmedLive-Handoff.md
 │   │   ├── 2026-08-15_5_BioHunter-AbbVieBayAreaFix-PaginationRootCauseParked-Handoff.md
+│   │   ├── 2026-08-17_2_BioHunter-ExtensionExtractionFixed-DeleteRouteBuilt-ScoutComplete-Handoff.md
 │   │   └── 2026-08-17_BioHunter-ExtensionCaptureLive-LLMExtractionScoped-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
@@ -117,7 +118,10 @@
 ├── check_run_log.py
 ├── check_schema.py
 ├── debug_posting_622.py
+├── delete_posting.py
 ├── LICENSE
+├── linkedin_diagnostic.js
+├── linkedin_diagnostic_v2.js
 ├── migrate_add_apply_url.py
 ├── migrate_repost_tracking.py
 ├── pyproject.toml

@@ -941,6 +941,14 @@ def posting_detail(posting_id):
   <button class="btn btn--secondary btn--small" type="submit"
     title="If the 'original posting' link above is dead, mark this posting stale so it drops out of the normal list.">
     Mark as stale (link is dead)</button>
+</form>
+<form method="post" action="{url_for('delete_posting_route')}" class="inline-form" style="margin-top:8px;"
+  onsubmit="return confirm('Permanently delete this posting{" and its generated draft" if draft is not None else ""}? This can\\'t be undone.');">
+  <input type="hidden" name="posting_id" value="{posting_id}">
+  <input type="hidden" name="redirect_to" value="{url_for('index')}">
+  <button class="btn btn--secondary btn--small" type="submit" style="color:#b00020;border-color:#b00020;"
+    title="Permanently remove this posting (and any draft/application/outreach tied to it). Unlike Mark as stale, this can't be undone.">
+    Delete posting</button>
 </form>"""
 
     if not posting["description"]:
@@ -1302,6 +1310,58 @@ def mark_stale_route():
     redirect_to = request.form.get("redirect_to") or url_for("index")
     separator = "&" if "?" in redirect_to else "?"
     return redirect(f"{redirect_to}{separator}marked={marked_count}")
+
+
+@app.route("/postings/delete", methods=["POST"])
+def delete_posting_route():
+    """Permanently removes a posting -- unlike mark_stale_route, this is
+    not reversible and the row is actually gone, not just hidden from the
+    normal list. Added 2026-08-17 alongside the browser extension capture
+    work: capture's dedup check matches on (company_id, url) regardless
+    of status, so a posting mistakenly marked stale (e.g. while testing
+    the extension) could never be re-captured under the same URL --
+    mark-stale alone had no way to undo that. Before this route existed,
+    the only way to actually delete a row was a standalone one-off script
+    run directly against the database from the terminal
+    (delete_posting.py); this is the same delete logic, exposed as a
+    dashboard button instead.
+
+    schema.sql has no ON DELETE CASCADE on any of postings' referencing
+    foreign keys, so dependent rows (drafts, applications, outreach_emails)
+    are deleted explicitly first, and any OTHER posting's
+    reposted_from_id pointing at this one is cleared -- otherwise either
+    the delete would fail outright (FK enforcement) or leave a dangling
+    reference (if not enforced), matching the same cleanup order
+    delete_posting.py already used.
+
+    Single posting_id only (unlike mark_stale_route, which accepts a
+    list) -- there's no bulk-delete UI today, only the single button on
+    posting_detail(). Extend to getlist("posting_id") the same way if a
+    bulk version is ever needed.
+    """
+    posting_id = request.form.get("posting_id")
+    if not posting_id:
+        abort(400)
+    posting_id = int(posting_id)
+
+    conn = get_connection()
+    init_schema(conn)
+
+    existing = conn.execute("SELECT id FROM postings WHERE id = ?", (posting_id,)).fetchone()
+    if existing is not None:
+        conn.execute("DELETE FROM drafts WHERE posting_id = ?", (posting_id,))
+        conn.execute("DELETE FROM applications WHERE posting_id = ?", (posting_id,))
+        conn.execute("DELETE FROM outreach_emails WHERE posting_id = ?", (posting_id,))
+        conn.execute(
+            "UPDATE postings SET reposted_from_id = NULL WHERE reposted_from_id = ?",
+            (posting_id,),
+        )
+        conn.execute("DELETE FROM postings WHERE id = ?", (posting_id,))
+        conn.commit()
+
+    redirect_to = request.form.get("redirect_to") or url_for("index")
+    separator = "&" if "?" in redirect_to else "?"
+    return redirect(f"{redirect_to}{separator}deleted={1 if existing is not None else 0}")
 
 
 @app.route("/jobs/<job_id>")

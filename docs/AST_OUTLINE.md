@@ -545,6 +545,10 @@ def mark_stale_route():
     """The only route that actually writes status='stale' from this"""
     ...
 
+def delete_posting_route():
+    """Permanently removes a posting -- unlike mark_stale_route, this is"""
+    ...
+
 def job_status_page(job_id):
     ...
 
