@@ -438,19 +438,82 @@ def parse_score(critique_text: str) -> ScoreResult:
 # _filtered_postings() helper extracted from index() for this) -- not a
 # second, separate filter UI, per the 2026-08-10 handoff's explicit
 # instruction.
+#
+# 2026-08-17 addition (Captain, item #2 only -- multi-select batch
+# generation): checkboxes on the postings-index cards + a "Generate
+# selected (N)" button -> a confirmation page (batch_generate_confirm)
+# listing exactly what will run, flagging any already-drafted postings
+# with a note (still checked by default -- your call to uncheck) and
+# excluding description-less postings entirely (listed read-only, since
+# batch has no per-posting paste step) -> POST /postings/batch-generate/
+# start spawns _run_batch_generation, which runs SEQUENTIALLY (one
+# posting at a time, protecting the local model's KV cache -- parallel
+# execution deferred until a beefier machine or a frontier API is in
+# play) using the SAME in-memory _jobs mechanism every other job kind
+# uses (explicit choice: a persisted job table is a separate future
+# session, not a dependency of this one). A per-posting failure is
+# caught, recorded, and the batch continues to the next posting rather
+# than stopping. New dedicated progress page (job_status_page's
+# "batch_generate" branch) shows two real progress bars (which posting;
+# that posting's own step/total_steps) plus a growing results list, not
+# just a final summary. A posting's single Generate button is blocked
+# while it's part of a running batch, mirroring the existing
+# single-generate in-flight check.
+#
+# 2026-08-23 addition (persisted job history): REVERSES this file's own
+# prior stated decision (see the "In-memory job registry" comment right
+# above _jobs' declaration, which said nothing here needs to survive a
+# restart) -- naming that reversal explicitly rather than letting it
+# happen quietly. Every _set_job() write now also upserts into a new
+# `jobs` table (schema.sql) via _persist_job(), so Recent Jobs survives a
+# dashboard restart. _jobs (the in-memory dict) is still the fast read
+# path for every request -- job_status_json's polling doesn't hit the DB
+# per poll, only writes do. On startup, main() calls _load_jobs_from_db()
+# to repopulate _jobs from the table; any job that was still
+# 'queued'/'running' when the PREVIOUS process stopped is rewritten to a
+# new 'interrupted' terminal status (its background thread doesn't exist
+# in this process, so leaving it 'running' would show a live-looking
+# progress bar that will never move again). Delete/clear controls
+# (POST /jobs/<id>/delete, POST /jobs/clear) only ever remove
+# finished/cancelled/interrupted jobs -- an active job is never deletable
+# out from under its own running thread.
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 POSTINGS_PER_PAGE = 60
 _jobs: dict[str, dict] = {}
+_ACTIVE_STATUSES = ('queued', 'running')
 def _set_job(job_id: str) -> None:
     ...
 
 def _get_job(job_id: str) -> dict | None:
     ...
 
+def _persist_job(job_id: str, snapshot: dict) -> None:
+    """Upserts the full current job dict into the `jobs` table. Called"""
+    ...
+
+def _load_jobs_from_db() -> None:
+    """Repopulates the in-memory _jobs dict from the `jobs` table --"""
+    ...
+
+def _delete_job(job_id: str) -> bool:
+    """Removes a job from history -- caller (delete_job_route) is"""
+    ...
+
+def _clear_jobs() -> int:
+    """Clears finished job history. NEVER removes a job that's still"""
+    ...
+
+class _JobCancelled(Exception):
+    """Raised from inside on_step() to abort _run_generation()'s single"""
+
 def _active_generate_job_for_posting(posting_id: int) -> dict | None:
     """Returns the most recently started in-flight (queued/running)"""
+    ...
+
+def _active_batch_job_for_posting(posting_id: int) -> dict | None:
+    """Mirrors _active_generate_job_for_posting() but for kind='batch_generate'"""
     ...
 
 def jobs_active_json():
@@ -458,11 +521,26 @@ def jobs_active_json():
     ...
 
 def jobs_index():
-    """Lists every job this dashboard process has run since it started --"""
+    """Lists persisted job history (the `jobs` table, schema.sql) --"""
+    ...
+
+def delete_job_route(job_id):
+    """Deletes one job from history. Refuses (silently, redirecting back"""
+    ...
+
+def clear_jobs_route():
+    ...
+
+def _job_display(job_id: str, job: dict) -> tuple[str, str, str]:
+    """Single source of truth for how a job shows up in BOTH jobs_index()"""
     ...
 
 def _run_generation(job_id: str, posting_id: int, company_name: str, job_title: str, job_description: str, revision_rounds: int, think: bool, stability: str) -> None:
     """Runs in a background thread, started by POST /postings/<id>/generate."""
+    ...
+
+def _run_batch_generation(job_id: str, items: list[dict], revision_rounds: int, think: bool, stability: str) -> None:
+    """Runs in a background thread, started by POST"""
     ...
 
 def _run_score_batch(job_id: str, posting_rows: list[tuple], rescore: bool, think: bool) -> None:
@@ -509,7 +587,7 @@ def _score_batch_form_html(filters: dict, matched_count: int) -> str:
     """POSTs the CURRENT filter state (as hidden fields, exact mirror of"""
     ...
 
-def _filtered_postings(conn, filters: dict) -> tuple[list[tuple], list[tuple]]:
+def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None=None) -> tuple[list[tuple], list[tuple]]:
     """The SQL query + keyword/location filtering index() has always done,"""
     ...
 
@@ -523,6 +601,18 @@ def _generate_options_html() -> str:
     ...
 
 def generate(posting_id):
+    ...
+
+def batch_generate_confirm():
+    """Confirmation step between the postings-index checkboxes and"""
+    ...
+
+def batch_generate_start():
+    """Starts the actual background thread -- only reached from"""
+    ...
+
+def cancel_job_route(job_id):
+    """Requests cancellation of a running/queued job -- sets a flag the"""
     ...
 
 def run_scout_route():
@@ -1256,7 +1346,7 @@ def _run_ats_fetch(conn, company: CompanyConfig, company_id: int, adapter, run_t
     """Shared after-fetch bookkeeping for any ATSAdapter -- a REGISTRY"""
     ...
 
-def run_scout(limiter: RateLimiter | None=None, db_path: str | None=None, on_company_done: Callable[[ScoutResult], None] | None=None) -> list[ScoutResult]:
+def run_scout(limiter: RateLimiter | None=None, db_path: str | None=None, on_company_done: Callable[[ScoutResult], None] | None=None, should_stop: Callable[[], bool] | None=None) -> list[ScoutResult]:
     """One Scout pass over every active company in the registry."""
     ...
 

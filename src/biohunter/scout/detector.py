@@ -348,6 +348,7 @@ def run_scout(
     limiter: RateLimiter | None = None,
     db_path: str | None = None,
     on_company_done: Callable[[ScoutResult], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[ScoutResult]:
     """One Scout pass over every active company in the registry.
 
@@ -371,6 +372,16 @@ def run_scout(
     visible immediately, not silently swallowed the way a single
     company's own fetch failure already is (see the try/except below,
     which is deliberately scoped to fetch/parse work only).
+
+    `should_stop`, added 2026-08-23 for dashboard cancel support: checked
+    ONCE at the top of each company's loop iteration, before that
+    company's fetch starts -- never mid-fetch. If it returns True, the
+    loop breaks immediately and whatever's already in `results` is
+    returned as-is (a partial pass, not an error) -- the in-flight
+    company (if should_stop() happens to fire while one IS running) is
+    never interrupted, only the NEXT one is skipped. Optional, defaults
+    to None (no behavior change for any existing caller that doesn't
+    pass it), same treatment as on_company_done above.
     """
     limiter = limiter or RateLimiter()
     conn = get_connection(db_path)
@@ -378,6 +389,8 @@ def run_scout(
 
     results: list[ScoutResult] = []
     for company in load_companies():
+        if should_stop and should_stop():
+            break
         company_id = _get_or_create_company_id(conn, company)
         run_time = datetime.datetime.now(datetime.timezone.utc)
         try:

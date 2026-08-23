@@ -62,7 +62,8 @@
 │   │   ├── 2026-08-15_4_BioHunter-DescriptionBackfill-ScorePostingsConfirmedLive-Handoff.md
 │   │   ├── 2026-08-15_5_BioHunter-AbbVieBayAreaFix-PaginationRootCauseParked-Handoff.md
 │   │   ├── 2026-08-17_2_BioHunter-ExtensionExtractionFixed-DeleteRouteBuilt-ScoutComplete-Handoff.md
-│   │   └── 2026-08-17_BioHunter-ExtensionCaptureLive-LLMExtractionScoped-Handoff.md
+│   │   ├── 2026-08-17_BioHunter-ExtensionCaptureLive-LLMExtractionScoped-Handoff.md
+│   │   └── 2026-08-23_BioHunter-CaptainBatchGeneratePersistedJobs-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md

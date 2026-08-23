@@ -156,7 +156,36 @@ CREATE TABLE IF NOT EXISTS candidate_settings (
     updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Added 2026-08-23, dashboard.py Recent Jobs persistence. Previously
+-- background job state (generate/batch_generate/score_batch/scout/
+-- dead_link_check progress and results) lived ONLY in dashboard.py's
+-- in-memory _jobs dict and was explicitly documented as not needing to
+-- survive a restart -- that decision is reversed here, per direct
+-- request, not a silent addition. `id` reuses the same hex job_id
+-- string dashboard.py already generates and puts in every /jobs/<id>
+-- URL -- no separate identifier scheme. `data_json` holds the FULL
+-- current job dict (every field _set_job() has ever written for that
+-- job_id, whatever shape that kind's runner uses) as JSON, same
+-- "store the whole thing as one JSON blob, not a normalized column per
+-- field" pattern drafts.result_json and run_log.detail already use in
+-- this file -- job kinds have different field shapes (see
+-- dashboard.py's _job_display()), so a normalized schema here would
+-- mean a wide table mostly full of NULLs. `kind`/`status` are pulled
+-- out as real columns anyway (not just left inside data_json) so a
+-- future query ("how many score_batch runs failed last week") doesn't
+-- need to deserialize every row's JSON to filter.
+CREATE TABLE IF NOT EXISTS jobs (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL,
+    status     TEXT NOT NULL,   -- queued | running | done | error | cancelled | interrupted
+    data_json  TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_postings_status ON postings(status);
 CREATE INDEX IF NOT EXISTS idx_postings_company ON postings(company_id);
 CREATE INDEX IF NOT EXISTS idx_drafts_posting ON drafts(posting_id);
 CREATE INDEX IF NOT EXISTS idx_postings_reposted_from ON postings(reposted_from_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);

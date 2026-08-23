@@ -66,6 +66,45 @@ keyword_filter_match() call the cards already render from, via a shared
 _filtered_postings() helper extracted from index() for this) -- not a
 second, separate filter UI, per the 2026-08-10 handoff's explicit
 instruction.
+
+2026-08-17 addition (Captain, item #2 only -- multi-select batch
+generation): checkboxes on the postings-index cards + a "Generate
+selected (N)" button -> a confirmation page (batch_generate_confirm)
+listing exactly what will run, flagging any already-drafted postings
+with a note (still checked by default -- your call to uncheck) and
+excluding description-less postings entirely (listed read-only, since
+batch has no per-posting paste step) -> POST /postings/batch-generate/
+start spawns _run_batch_generation, which runs SEQUENTIALLY (one
+posting at a time, protecting the local model's KV cache -- parallel
+execution deferred until a beefier machine or a frontier API is in
+play) using the SAME in-memory _jobs mechanism every other job kind
+uses (explicit choice: a persisted job table is a separate future
+session, not a dependency of this one). A per-posting failure is
+caught, recorded, and the batch continues to the next posting rather
+than stopping. New dedicated progress page (job_status_page's
+"batch_generate" branch) shows two real progress bars (which posting;
+that posting's own step/total_steps) plus a growing results list, not
+just a final summary. A posting's single Generate button is blocked
+while it's part of a running batch, mirroring the existing
+single-generate in-flight check.
+
+2026-08-23 addition (persisted job history): REVERSES this file's own
+prior stated decision (see the "In-memory job registry" comment right
+above _jobs' declaration, which said nothing here needs to survive a
+restart) -- naming that reversal explicitly rather than letting it
+happen quietly. Every _set_job() write now also upserts into a new
+`jobs` table (schema.sql) via _persist_job(), so Recent Jobs survives a
+dashboard restart. _jobs (the in-memory dict) is still the fast read
+path for every request -- job_status_json's polling doesn't hit the DB
+per poll, only writes do. On startup, main() calls _load_jobs_from_db()
+to repopulate _jobs from the table; any job that was still
+'queued'/'running' when the PREVIOUS process stopped is rewritten to a
+new 'interrupted' terminal status (its background thread doesn't exist
+in this process, so leaving it 'running' would show a live-looking
+progress bar that will never move again). Delete/clear controls
+(POST /jobs/<id>/delete, POST /jobs/clear) only ever remove
+finished/cancelled/interrupted jobs -- an active job is never deletable
+out from under its own running thread.
 """
 from __future__ import annotations
 
@@ -76,6 +115,7 @@ import json
 import logging
 import threading
 import uuid
+from datetime import datetime, timezone
 
 from flask import Flask, Response, abort, jsonify, redirect, request, url_for
 
@@ -109,25 +149,159 @@ POSTINGS_PER_PAGE = 60
 _esc = html.escape
 
 # ---------------------------------------------------------------------------
-# In-memory job registry. See module docstring for why this is
-# intentionally NOT a task queue -- single local user, a handful of
-# concurrent generations at most, nothing here needs to survive a
-# process restart (drafts_db.py is the thing that survives).
+# Job registry. In-memory dict is still the live fast-path (every request
+# reads from here, never the DB) -- but every write also persists to the
+# `jobs` table (schema.sql) so Recent Jobs survives a dashboard restart.
+# See the module docstring's 2026-08-23 entry for why this reverses what
+# this comment used to say.
 # ---------------------------------------------------------------------------
 
 _jobs_lock = threading.Lock()
 _jobs: dict[str, dict] = {}
+_ACTIVE_STATUSES = ("queued", "running")
 
 
 def _set_job(job_id: str, **fields) -> None:
     with _jobs_lock:
-        _jobs.setdefault(job_id, {}).update(fields)
+        job = _jobs.setdefault(job_id, {})
+        if "created_at" not in job:
+            job["created_at"] = datetime.now(timezone.utc).isoformat()
+        job.update(fields)
+        snapshot = dict(job)
+    _persist_job(job_id, snapshot)
 
 
 def _get_job(job_id: str) -> dict | None:
     with _jobs_lock:
         job = _jobs.get(job_id)
         return dict(job) if job is not None else None
+
+
+def _persist_job(job_id: str, snapshot: dict) -> None:
+    """Upserts the full current job dict into the `jobs` table. Called
+    from _set_job() on EVERY write, including the frequent per-step
+    ticks during a generation -- a local SQLite/libSQL write is well
+    under a millisecond, and on_step/_on_company_done already call
+    through get_connection() this often elsewhere in this file, so this
+    isn't a new I/O pattern, just a new table it happens to also write
+    to. Best-effort: a persistence failure is logged, never raised -- a
+    job's in-memory progress (what every page actually reads) should
+    never be lost just because a DB write hiccuped."""
+    try:
+        conn = get_connection()
+        init_schema(conn)
+        conn.execute(
+            """INSERT INTO jobs (id, kind, status, data_json, updated_at)
+               VALUES (?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(id) DO UPDATE SET
+                 kind = excluded.kind, status = excluded.status,
+                 data_json = excluded.data_json, updated_at = excluded.updated_at""",
+            (job_id, snapshot.get("kind", "unknown"), snapshot.get("status", "unknown"), json.dumps(snapshot)),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001 -- persistence is best-effort, see docstring
+        logger.exception("failed to persist job %s -- in-memory state is still correct", job_id)
+
+
+def _load_jobs_from_db() -> None:
+    """Repopulates the in-memory _jobs dict from the `jobs` table --
+    called once from main(), before app.run(). Any job that was still
+    'queued' or 'running' when the PREVIOUS process stopped is rewritten
+    to 'interrupted' here (both in memory and written back to the DB):
+    its background thread doesn't exist in this new process, so leaving
+    it 'running' would show a live-looking progress bar and an active
+    Cancel button for a job that will never move again. 'interrupted' is
+    a distinct terminal status from 'cancelled' (a user's own choice) and
+    'error' (a real exception) -- see _job_display()'s per-kind
+    'interrupted' branches for how each kind explains this."""
+    try:
+        conn = get_connection()
+        init_schema(conn)
+        rows = conn.execute("SELECT id, data_json FROM jobs").fetchall()
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to load persisted jobs -- starting with empty job history")
+        return
+
+    to_rewrite: list[tuple[str, dict]] = []
+    with _jobs_lock:
+        for job_id, data_json in rows:
+            try:
+                job = json.loads(data_json)
+            except (TypeError, ValueError):
+                continue
+            if job.get("status") in _ACTIVE_STATUSES:
+                job["status"] = "interrupted"
+                to_rewrite.append((job_id, dict(job)))
+            _jobs[job_id] = job
+
+    for job_id, job in to_rewrite:
+        _persist_job(job_id, job)
+
+    logger.info("loaded %d persisted job(s), %d marked interrupted", len(rows), len(to_rewrite))
+
+
+def _delete_job(job_id: str) -> bool:
+    """Removes a job from history -- caller (delete_job_route) is
+    responsible for confirming it isn't queued/running first; this
+    function itself doesn't re-check, so it's not meant to be called
+    directly from anywhere else without that same guard."""
+    with _jobs_lock:
+        existed = _jobs.pop(job_id, None) is not None
+    try:
+        conn = get_connection()
+        init_schema(conn)
+        conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to delete persisted job %s", job_id)
+    return existed
+
+
+def _clear_jobs() -> int:
+    """Clears finished job history. NEVER removes a job that's still
+    queued/running -- its background thread is real and still writing to
+    this same job_id; deleting the row out from under it would just have
+    the next _set_job() call silently recreate it via setdefault(), so
+    excluding active jobs isn't just a safety nicety, it avoids a
+    confusing half-deleted state. Returns the number actually removed."""
+    with _jobs_lock:
+        to_remove = [jid for jid, j in _jobs.items() if j.get("status") not in _ACTIVE_STATUSES]
+        for jid in to_remove:
+            _jobs.pop(jid, None)
+        remaining_ids = list(_jobs.keys())
+    try:
+        conn = get_connection()
+        init_schema(conn)
+        if remaining_ids:
+            placeholders = ",".join("?" for _ in remaining_ids)
+            conn.execute(f"DELETE FROM jobs WHERE id NOT IN ({placeholders})", tuple(remaining_ids))
+        else:
+            conn.execute("DELETE FROM jobs")
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to clear persisted jobs")
+    return len(to_remove)
+
+
+class _JobCancelled(Exception):
+    """Raised from inside on_step() to abort _run_generation()'s single
+    blocking run_revision_loop() call from within -- the only kind of job
+    in this file where cancellation can't be checked between discrete
+    Python-level loop iterations, since there IS no loop here Python
+    controls; run_revision_loop() itself calls on_step() once per unit
+    of work and this is the only hook available.
+
+    CONFIRMED PARTIALLY LIVE-VIABLE (2026-08-23, via revision.py): the
+    two direct on_step("round N: critique") calls inside
+    run_revision_loop() itself are bare, no try/except around them, so
+    raising here from those specific calls WILL propagate cleanly. The
+    other ~9-per-round on_step calls happen inside generate_draft()
+    (writer.py, not uploaded this session) -- whether THOSE specifically
+    swallow the exception is still unconfirmed. Worst case: Cancel on a
+    single-posting generate only takes effect on the "critique" step of
+    whichever round is running (1 of 10 steps) instead of the very next
+    step -- delayed, not broken."""
+
 
 
 def _active_generate_job_for_posting(posting_id: int) -> dict | None:
@@ -147,6 +321,30 @@ def _active_generate_job_for_posting(posting_id: int) -> dict | None:
         matches = [
             {"job_id": jid, **j} for jid, j in _jobs.items()
             if j.get("kind") == "generate" and j.get("posting_id") == posting_id
+            and j.get("status") in ("queued", "running")
+        ]
+    return matches[-1] if matches else None
+
+
+def _active_batch_job_for_posting(posting_id: int) -> dict | None:
+    """Mirrors _active_generate_job_for_posting() but for kind='batch_generate'
+    jobs (added 2026-08-17 for multi-select batch generation, see
+    _run_batch_generation()'s docstring). Returns the batch job if
+    posting_id is anywhere in its posting_ids list and the batch's
+    OVERALL status is still queued/running.
+
+    Deliberate simplification, confirmed with the user rather than just
+    assumed: this blocks the single-posting Generate button for EVERY
+    posting in the batch for as long as the batch is running -- even
+    ones already finished earlier in the sequence. Revisit only if that
+    turns out to be annoying in practice; the per-posting result is
+    already visible in the batch job's own results list well before the
+    whole batch finishes."""
+    with _jobs_lock:
+        matches = [
+            {"job_id": jid, **j} for jid, j in _jobs.items()
+            if j.get("kind") == "batch_generate"
+            and posting_id in (j.get("posting_ids") or [])
             and j.get("status") in ("queued", "running")
         ]
     return matches[-1] if matches else None
@@ -173,39 +371,222 @@ def jobs_active_json():
 
 @app.route("/jobs")
 def jobs_index():
-    """Lists every job this dashboard process has run since it started --
-    added after a real session where navigating away from a finished
-    check-dead-links results page (an accidental click, nothing more)
-    left no way back except digging through browser history or the Flask
-    console log. _jobs is in-memory only, so this only shows jobs from
-    the CURRENT process -- a restart clears it, same as every other job
-    result in this file. Newest first."""
+    """Lists persisted job history (the `jobs` table, schema.sql) --
+    survives a dashboard restart as of 2026-08-23 (see module docstring's
+    entry for that date; this used to say the opposite). Sorted by
+    created_at, newest first -- NOT by job_id, which is a random hex
+    string with no chronological meaning (a pre-existing quirk in the
+    sort this rework also fixes, named here since it's a real behavior
+    change, not just an addition).
+
+    2026-08-23 rework, per real usage feedback:
+    - job_id (a bare hex string) is no longer the visible title -- each
+      kind now gets a human-readable label + a live detail line built by
+      _job_display(), the SAME per-kind field names _run_score_batch()/
+      _run_scout_job()/_run_dead_link_check_job()/_run_batch_generation()/
+      _run_generation() already write, not a new data shape.
+    - the page auto-refreshes every 4s while ANY listed job is still
+      queued/running, so progress is visible without a manual reload --
+      a plain page reload, not per-card JS patching, matching this
+      project's stated preference for the smaller/simpler mechanism over
+      a cleverer one for something this size.
+    - a Cancel button appears next to any still-running job of a kind
+      that can actually honor it (see cancel_job_route()'s docstring).
+    - a Delete button appears on every FINISHED job (never an active
+      one -- see _clear_jobs()'s docstring for why), plus a "Clear all
+      history" button that removes every finished job at once, same
+      active-job exclusion."""
     with _jobs_lock:
-        items = sorted(_jobs.items(), key=lambda kv: kv[0], reverse=True)
+        items = sorted(_jobs.items(), key=lambda kv: kv[1].get("created_at", ""), reverse=True)
+
+    any_active = any(j.get("status") in _ACTIVE_STATUSES for _jid, j in items)
+    any_finished = any(j.get("status") not in _ACTIVE_STATUSES for _jid, j in items)
 
     def _job_link(job_id: str, job: dict) -> str:
-        kind = job.get("kind", "unknown")
         status = job.get("status", "unknown")
-        if kind == "dead_link_check" and status == "done":
-            href = url_for("dead_links_results", job_id=job_id)
-            detail = f"{len(job.get('dead', []))} dead, {len(job.get('uncertain', []))} inconclusive"
-        else:
-            href = url_for("job_status_page", job_id=job_id)
-            detail = status
+        kind = job.get("kind", "unknown")
+        label, detail, href = _job_display(job_id, job)
+        actions = []
+        if status in _ACTIVE_STATUSES and kind in ("batch_generate", "score_batch", "dead_link_check", "scout", "generate"):
+            actions.append(f"""<form method="post" action="{url_for('cancel_job_route', job_id=job_id)}"
+  class="inline-form" style="display:inline-block;"
+  onsubmit="return confirm('Cancel this job? It stops after the current item finishes, not instantly.');">
+  <input type="hidden" name="redirect_to" value="{url_for('jobs_index')}">
+  <button class="btn btn--secondary btn--small" type="submit" style="color:#b00020;border-color:#b00020;">Cancel</button>
+</form>""")
+        if status not in _ACTIVE_STATUSES:
+            actions.append(f"""<form method="post" action="{url_for('delete_job_route', job_id=job_id)}"
+  class="inline-form" style="display:inline-block;margin-left:6px;"
+  onsubmit="return confirm('Delete this job from history? This cannot be undone.');">
+  <button class="btn btn--secondary btn--small" type="submit">Delete</button>
+</form>""")
+        actions_html = f'<div style="margin-top:8px;">{"".join(actions)}</div>' if actions else ""
         return f"""<div class="card">
-  <div class="card__company">{_esc(kind)}</div>
-  <h3 class="card__title"><a href="{href}">{_esc(job_id)}</a></h3>
+  <div class="card__company">{_esc(kind)} &middot; {_esc(status)}</div>
+  <h3 class="card__title"><a href="{href}">{_esc(label)}</a></h3>
   <div class="card__meta">{_esc(detail)}</div>
+  {actions_html}
 </div>"""
 
-    cards = "".join(_job_link(jid, j) for jid, j in items) or '<div class="empty-state">No jobs run yet this session.</div>'
+    cards = "".join(_job_link(jid, j) for jid, j in items) or '<div class="empty-state">No jobs in history yet.</div>'
+    refresh_script = (
+        '<script>setTimeout(function(){ window.location.reload(); }, 4000);</script>' if any_active else ""
+    )
+    clear_all_form = ""
+    if any_finished:
+        clear_all_form = f"""<form method="post" action="{url_for('clear_jobs_route')}" style="margin:8px 0 16px;"
+  onsubmit="return confirm('Clear all finished job history? Jobs still running are kept. This cannot be undone.');">
+  <button class="btn btn--secondary btn--small" type="submit">Clear all history</button>
+</form>"""
     body = f"""<div class="dash-wrap">
   <div class="detail-header"><h1>Recent jobs</h1></div>
-  <p class="sub">Jobs run since this dashboard process started -- lost when it restarts.</p>
+  <p class="sub">Job history -- survives a dashboard restart. A job still running when the process last stopped shows as "interrupted".</p>
+  {clear_all_form}
   <div class="grid">{cards}</div>
   <p class="sub" style="margin-top:16px;"><a class="btn btn--secondary btn--small" href="{url_for('index')}">Back to postings</a></p>
-</div>"""
+</div>{refresh_script}"""
     return _page("Recent jobs", body)
+
+
+@app.route("/jobs/<job_id>/delete", methods=["POST"])
+def delete_job_route(job_id):
+    """Deletes one job from history. Refuses (silently, redirecting back
+    unchanged) if the job is still queued/running -- an active job's
+    background thread is real and will keep calling _set_job() on this
+    same job_id regardless; deleting the row now would just have it
+    silently reappear on the next write."""
+    job = _get_job(job_id)
+    if job is not None and job.get("status") not in _ACTIVE_STATUSES:
+        _delete_job(job_id)
+    return redirect(url_for("jobs_index"))
+
+
+@app.route("/jobs/clear", methods=["POST"])
+def clear_jobs_route():
+    _clear_jobs()
+    return redirect(url_for("jobs_index"))
+
+
+def _job_display(job_id: str, job: dict) -> tuple[str, str, str]:
+    """Single source of truth for how a job shows up in BOTH jobs_index()
+    and job_status_page() -- one implementation of "what does this job's
+    title/detail/result-link look like", not two that could drift.
+    Returns (label, detail, link_url). Every field referenced here is one
+    a job runner ALREADY writes (_run_generation/_run_batch_generation/
+    _run_score_batch/_run_scout_job/_run_dead_link_check_job) -- no new
+    job-dict shape introduced for this."""
+    kind = job.get("kind", "unknown")
+    status = job.get("status", "unknown")
+
+    if kind == "generate":
+        label = f"{job.get('company_name') or '?'} \u2014 {job.get('job_title') or '?'}"
+        if status == "done":
+            detail = "Done"
+            href = url_for("posting_detail", posting_id=job.get("posting_id")) if job.get("posting_id") else url_for("job_status_page", job_id=job_id)
+        elif status == "cancelled":
+            detail = "Cancelled \u2014 no draft was saved"
+            href = url_for("posting_detail", posting_id=job.get("posting_id")) if job.get("posting_id") else url_for("job_status_page", job_id=job_id)
+        elif status == "interrupted":
+            detail = "Interrupted by a dashboard restart \u2014 no draft was saved"
+            href = url_for("posting_detail", posting_id=job.get("posting_id")) if job.get("posting_id") else url_for("job_status_page", job_id=job_id)
+        elif status == "error":
+            detail = f"Failed: {job.get('error', '')}"
+            href = url_for("job_status_page", job_id=job_id)
+        else:
+            total_steps = job.get("total_steps") or 0
+            step = job.get("step") or 0
+            detail = f"{job.get('current') or 'starting…'}" + (f" (step {step}/{total_steps})" if total_steps else "")
+            href = url_for("job_status_page", job_id=job_id)
+        return label, detail, href
+
+    if kind == "batch_generate":
+        total = job.get("total") or 0
+        label = f"Batch generate \u2014 {total} posting(s)"
+        if status == "done":
+            detail = f"{job.get('succeeded', 0)} succeeded, {job.get('failed', 0)} failed"
+        elif status == "cancelled":
+            done_count = len(job.get("results") or [])
+            detail = f"Cancelled after {done_count} of {total} \u2014 {job.get('succeeded', 0)} succeeded, {job.get('failed', 0)} failed"
+        elif status == "interrupted":
+            results = job.get("results") or []
+            succ = sum(1 for r in results if r.get("status") == "done")
+            fail = sum(1 for r in results if r.get("status") == "error")
+            detail = f"Interrupted by a dashboard restart after {len(results)} of {total} \u2014 {succ} succeeded, {fail} failed"
+        elif status == "error":
+            detail = f"Failed: {job.get('error', '')}"
+        else:
+            idx = job.get("batch_index") or 0
+            cur = job.get("current_company") or ""
+            title = job.get("current_title") or ""
+            step = job.get("step") or 0
+            total_steps = job.get("total_steps") or 0
+            detail = f"Posting {idx} of {total}"
+            if cur:
+                detail += f" \u2014 {cur} \u2014 {title}"
+            if total_steps:
+                detail += f" (step {step}/{total_steps})"
+        return label, detail, url_for("job_status_page", job_id=job_id)
+
+    if kind == "score_batch":
+        total = job.get("total") or 0
+        label = f"Score batch \u2014 {total} filtered posting(s)"
+        detail = f"{job.get('scored', 0)} scored, {job.get('skipped', 0)} skipped, of {total}"
+        if status == "cancelled":
+            detail = "Cancelled \u2014 " + detail
+        elif status == "interrupted":
+            detail = "Interrupted by a dashboard restart \u2014 " + detail
+        elif status == "error":
+            detail = f"Failed: {job.get('error', '')}"
+        elif status in ("queued", "running") and job.get("current"):
+            detail += f" \u2014 currently: {job['current']}"
+        return label, detail, url_for("job_status_page", job_id=job_id)
+
+    if kind == "scout":
+        label = "Scout run"
+        if status == "done":
+            detail = f"{job.get('companies_checked', 0)} companies checked, {job.get('new_postings', 0)} new"
+            if job.get("error_count"):
+                detail += f", {job['error_count']} error(s)"
+        elif status == "cancelled":
+            detail = (f"Cancelled after {job.get('companies_checked', 0)} of {job.get('total_companies', 0)} "
+                      f"companies \u2014 {job.get('new_postings', 0)} new so far")
+            if job.get("error_count"):
+                detail += f", {job['error_count']} error(s)"
+        elif status == "interrupted":
+            detail = (f"Interrupted by a dashboard restart after {job.get('companies_done', 0)} of "
+                      f"{job.get('total_companies', 0)} companies checked")
+        elif status == "error":
+            detail = f"Failed: {job.get('error', '')}"
+        else:
+            total_companies = job.get("total_companies") or 0
+            done = job.get("companies_done") or 0
+            detail = f"{done} of {total_companies} companies checked" if total_companies else "Checking company career pages…"
+            if job.get("current_company"):
+                detail += f" \u2014 last: {job['current_company']}"
+        return label, detail, url_for("job_status_page", job_id=job_id)
+
+    if kind == "dead_link_check":
+        label = "Dead link check"
+        if status == "done":
+            detail = f"{len(job.get('dead', []))} dead, {len(job.get('uncertain', []))} inconclusive"
+            return label, detail, url_for("dead_links_results", job_id=job_id)
+        if status == "cancelled":
+            detail = (f"Cancelled after {job.get('checked', 0)} of {job.get('total', 0)} checked \u2014 "
+                      f"{len(job.get('dead', []))} dead, {len(job.get('uncertain', []))} inconclusive so far")
+            return label, detail, url_for("dead_links_results", job_id=job_id)
+        if status == "interrupted":
+            detail = (f"Interrupted by a dashboard restart after {job.get('checked', 0)} of {job.get('total', 0)} checked \u2014 "
+                      f"{len(job.get('dead', []))} dead, {len(job.get('uncertain', []))} inconclusive so far")
+            return label, detail, url_for("dead_links_results", job_id=job_id)
+        if status == "error":
+            detail = f"Failed: {job.get('error', '')}"
+        else:
+            detail = f"{job.get('checked', 0)} of {job.get('total', 0)} checked"
+            if job.get("current"):
+                detail += f" \u2014 currently: {job['current']}"
+        return label, detail, url_for("job_status_page", job_id=job_id)
+
+    return kind, status, url_for("job_status_page", job_id=job_id)
 
 
 def _run_generation(
@@ -238,6 +619,8 @@ def _run_generation(
     def on_step(label: str) -> None:
         step_state["n"] += 1
         _set_job(job_id, step=step_state["n"], total_steps=total_steps, current=label)
+        if (_get_job(job_id) or {}).get("cancel_requested"):
+            raise _JobCancelled()
 
     _set_job(
         job_id, status="running", posting_id=posting_id, kind="generate",
@@ -260,9 +643,124 @@ def _run_generation(
         init_schema(conn)
         draft_id = drafts_db.save_draft(conn, posting_id, result)
         _set_job(job_id, status="done", draft_id=draft_id)
+    except _JobCancelled:
+        logger.info("generation for posting %s cancelled by user (job %s)", posting_id, job_id)
+        _set_job(job_id, status="cancelled")
     except Exception as exc:  # noqa: BLE001 -- surface any failure to the polling page, don't just log it
         logger.exception("generation failed for posting %s", posting_id)
         _set_job(job_id, status="error", error=str(exc))
+
+
+def _run_batch_generation(
+    job_id: str,
+    items: list[dict],
+    revision_rounds: int,
+    think: bool,
+    stability: str,
+) -> None:
+    """Runs in a background thread, started by POST
+    /postings/batch-generate/start. `items` is a list of
+    {posting_id, company, title, description} dicts, already filtered to
+    only postings that have a stored description (batch has no
+    per-posting paste step) -- see batch_generate_confirm()/
+    batch_generate_start().
+
+    SEQUENTIAL BY DESIGN, confirmed with the user, not a shortcut: one
+    posting is generated at a time, not in parallel, specifically to
+    protect the local Ollama model's KV cache on this machine. Parallel
+    execution (a more powerful machine, or routing to a frontier API) is
+    an explicitly deferred future option -- not built here.
+
+    Does NOT call _run_generation() -- that function writes status/kind/
+    step/total_steps under whatever job_id it's given, and reusing it
+    here would collide with this function's own writes to the SAME
+    job_id across multiple postings. The per-posting step-counting logic
+    (10 units of work per round, matching run_revision_loop()'s on_step
+    contract) is duplicated here rather than factored into a shared
+    helper -- a small amount of duplication over a shared helper for
+    something this size, consistent with this project's stated
+    preference.
+
+    Per-posting failure handling: confirmed with the user, not assumed.
+    A single posting's generation error is caught, recorded in
+    `results` with status='error', and the loop CONTINUES to the next
+    posting -- one bad posting never loses progress already made on the
+    others. All results (done and error) are visible together once the
+    whole batch finishes, nothing buried in only a log line.
+
+    Progress fields written to the job dict:
+    - batch_index / total: which posting (1-based) is current, out of
+      how many
+    - current_company / current_title: which posting is running now
+    - step / total_steps / current: the SAME per-posting step contract
+      _run_generation() uses, so the batch status page can show a real
+      nested progress bar for the posting in flight, not just the outer
+      count
+    - results: grows by one entry after each posting finishes (done or
+      error), read by job_status_page()'s batch_generate branch to show
+      a running list, not just a final summary
+    """
+    total = len(items)
+    _set_job(
+        job_id, status="running", kind="batch_generate",
+        posting_ids=[it["posting_id"] for it in items],
+        total=total, batch_index=0, current_company="", current_title="",
+        step=0, total_steps=0, current="", results=[],
+    )
+    results: list[dict] = []
+    for idx, item in enumerate(items, start=1):
+        if (_get_job(job_id) or {}).get("cancel_requested"):
+            break
+        posting_id = item["posting_id"]
+        company_name = item["company"]
+        job_title = item["title"]
+        job_description = item["description"]
+
+        total_steps = 10 * (revision_rounds + 1)
+        step_state = {"n": 0}
+
+        def on_step(label: str, _step_state=step_state, _total_steps=total_steps) -> None:
+            _step_state["n"] += 1
+            _set_job(job_id, step=_step_state["n"], total_steps=_total_steps, current=label)
+
+        _set_job(
+            job_id, batch_index=idx, current_company=company_name, current_title=job_title,
+            step=0, total_steps=total_steps, current="starting…",
+        )
+        try:
+            client = LLMClient()
+            result = run_revision_loop(
+                client,
+                company_name=company_name,
+                job_title=job_title,
+                job_description=job_description,
+                revision_rounds=revision_rounds,
+                think=think,
+                stability=stability,
+                on_step=on_step,
+            )
+            conn = get_connection()
+            init_schema(conn)
+            draft_id = drafts_db.save_draft(conn, posting_id, result)
+            results.append({
+                "posting_id": posting_id, "company": company_name, "title": job_title,
+                "status": "done", "draft_id": draft_id,
+            })
+        except Exception as exc:  # noqa: BLE001 -- per-posting failure, batch continues
+            logger.exception("batch generation failed for posting %s (job %s)", posting_id, job_id)
+            results.append({
+                "posting_id": posting_id, "company": company_name, "title": job_title,
+                "status": "error", "error": str(exc),
+            })
+        _set_job(job_id, results=list(results))
+
+    succeeded = sum(1 for r in results if r["status"] == "done")
+    failed = sum(1 for r in results if r["status"] == "error")
+    was_cancelled = (_get_job(job_id) or {}).get("cancel_requested", False)
+    _set_job(
+        job_id, status=("cancelled" if was_cancelled else "done"),
+        results=results, succeeded=succeeded, failed=failed,
+    )
 
 
 def _run_score_batch(
@@ -305,6 +803,8 @@ def _run_score_batch(
         scored = 0
         skipped = 0
         for posting_id, company, title, location, status, description in posting_rows:
+            if (_get_job(job_id) or {}).get("cancel_requested"):
+                break
             _set_job(job_id, current=f"{company} -- {title}")
             if not description:
                 skipped += 1
@@ -324,7 +824,8 @@ def _run_score_batch(
             scored += 1
             _set_job(job_id, scored=scored)
 
-        _set_job(job_id, status="done", scored=scored, skipped=skipped, total=total)
+        was_cancelled = (_get_job(job_id) or {}).get("cancel_requested", False)
+        _set_job(job_id, status=("cancelled" if was_cancelled else "done"), scored=scored, skipped=skipped, total=total)
     except Exception as exc:  # noqa: BLE001
         logger.exception("score batch job %s failed", job_id)
         _set_job(job_id, status="error", error=str(exc))
@@ -361,23 +862,27 @@ def _run_scout_job(job_id: str) -> None:
             current_company=result.company_name,
         )
 
+    def _should_stop() -> bool:
+        return (_get_job(job_id) or {}).get("cancel_requested", False)
+
     try:
-        results = run_scout(on_company_done=_on_company_done)
+        results = run_scout(on_company_done=_on_company_done, should_stop=_should_stop)
         total_new = sum(r.new_postings for r in results)
         errors = [r for r in results if r.strategy == "error"]
 
         conn = get_connection()
         init_schema(conn)
-        status = "ok" if not errors else "partial"
+        log_status = "ok" if not errors else "partial"
         detail = json.dumps({
             "companies_checked": len(results),
             "new_postings": total_new,
             "errors": [{"company": r.company_name, "error": r.error} for r in errors],
         })
-        _log_run(conn, status, detail)
+        _log_run(conn, log_status, detail)
 
+        was_cancelled = (_get_job(job_id) or {}).get("cancel_requested", False)
         _set_job(
-            job_id, status="done",
+            job_id, status=("cancelled" if was_cancelled else "done"),
             companies_checked=len(results), new_postings=total_new, error_count=len(errors),
         )
     except Exception as exc:  # noqa: BLE001
@@ -420,6 +925,8 @@ def _run_dead_link_check_job(job_id: str, posting_rows: list[tuple]) -> None:
         dead: list[dict] = []
         uncertain: list[dict] = []
         for i, (posting_id, company, title, url) in enumerate(posting_rows, start=1):
+            if (_get_job(job_id) or {}).get("cancel_requested"):
+                break
             _set_job(job_id, current=f"{company} -- {title}")
             is_alive, detail = check_url_alive(url, limiter)
             entry = {"id": posting_id, "company": company, "title": title, "url": url, "detail": detail}
@@ -429,7 +936,9 @@ def _run_dead_link_check_job(job_id: str, posting_rows: list[tuple]) -> None:
                 uncertain.append(entry)
             _set_job(job_id, checked=i, dead=dead, uncertain=uncertain)
 
-        _set_job(job_id, status="done", checked=total, dead=dead, uncertain=uncertain)
+        was_cancelled = (_get_job(job_id) or {}).get("cancel_requested", False)
+        final_checked = (_get_job(job_id) or {}).get("checked", 0)
+        _set_job(job_id, status=("cancelled" if was_cancelled else "done"), checked=final_checked, dead=dead, uncertain=uncertain)
     except Exception as exc:  # noqa: BLE001
         logger.exception("dead link check job %s failed", job_id)
         _set_job(job_id, status="error", error=str(exc))
@@ -700,6 +1209,7 @@ def _parse_filters(args) -> dict:
         "date_from": (args.get("date_from") or "").strip(),
         "date_to": (args.get("date_to") or "").strip(),
         "min_score": (args.get("min_score") or "").strip(),
+        "draft_status": args.get("draft_status") if args.get("draft_status") in ("has", "none") else "",
         "page": max(1, int(args.get("page") or 1)) if str(args.get("page") or "1").isdigit() else 1,
     }
 
@@ -711,7 +1221,7 @@ def _filters_query_string(filters: dict, **overrides) -> str:
         "keyword": filters["keyword"], "location": filters["location"],
         "bay_area": "1" if filters["bay_area"] else "", "company": filters["company"],
         "date_from": filters["date_from"], "date_to": filters["date_to"],
-        "min_score": filters["min_score"], "page": filters["page"],
+        "min_score": filters["min_score"], "draft_status": filters["draft_status"], "page": filters["page"],
     }
     merged.update(overrides)
     from urllib.parse import urlencode
@@ -756,6 +1266,12 @@ def _filter_bar_html(filters: dict, companies: list[str]) -> str:
     <input type="date" id="f-date-to" name="date_to" value="{_esc(filters['date_to'])}"></div>
   <div class="field"><label for="f-min-score">Min fit score</label>
     <input type="number" id="f-min-score" name="min_score" min="1" max="10" value="{_esc(filters['min_score'])}" style="width:56px;"></div>
+  <div class="field"><label for="f-draft-status">Draft status</label>
+    <select id="f-draft-status" name="draft_status">
+      <option value="" {"selected" if not filters['draft_status'] else ""}>Any</option>
+      <option value="has" {"selected" if filters['draft_status'] == 'has' else ""}>Has draft</option>
+      <option value="none" {"selected" if filters['draft_status'] == 'none' else ""}>No draft yet</option>
+    </select></div>
   <div class="actions">
     <button class="btn btn--small" type="submit">Apply</button>
     <a class="btn btn--secondary btn--small" href="{url_for('index')}">Clear</a>
@@ -777,7 +1293,7 @@ def _score_batch_form_html(filters: dict, matched_count: int) -> str:
             ("keyword", filters["keyword"]), ("location", filters["location"]),
             ("bay_area", "1" if filters["bay_area"] else ""), ("company", filters["company"]),
             ("date_from", filters["date_from"]), ("date_to", filters["date_to"]),
-            ("min_score", filters["min_score"]),
+            ("min_score", filters["min_score"]), ("draft_status", filters["draft_status"]),
         ] if value
     )
     return f"""<form class="score-batch-bar" method="post" action="{url_for('score_batch_route')}">
@@ -796,12 +1312,20 @@ def _score_batch_form_html(filters: dict, matched_count: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _filtered_postings(conn, filters: dict) -> tuple[list[tuple], list[tuple]]:
+def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = None) -> tuple[list[tuple], list[tuple]]:
     """The SQL query + keyword/location filtering index() has always done,
     extracted so POST /postings/score-batch can run Scorer over EXACTLY
     the same filtered set the cards were rendered from -- one filtering
     implementation, two callers, not a second filter UI/logic path per
     the 2026-08-10 handoff's explicit instruction.
+
+    2026-08-23 addition: draft_status ("has"/"none"/"" for any) filters
+    against drafts_by_posting (drafts_db.latest_draft_index()) -- passed
+    in by callers that already have it (index()) so it isn't queried
+    twice per request; computed here if a caller doesn't have it yet
+    (score_batch_route()), so BOTH callers apply the SAME draft filter
+    rather than index() alone drifting from what Scorer actually runs
+    over.
 
     Returns (all_rows, filtered_rows); each row is (id, company, title,
     location, status, score, first_seen_at, description) -- description
@@ -837,6 +1361,15 @@ def _filtered_postings(conn, filters: dict) -> tuple[list[tuple], list[tuple]]:
         if keyword_filter_match(row[2], filters["keyword_list"], [])
         and keyword_filter_match(row[3] or "", location_include, [])
     ]
+
+    if filters.get("draft_status") in ("has", "none"):
+        if drafts_by_posting is None:
+            drafts_by_posting = drafts_db.latest_draft_index(conn)
+        if filters["draft_status"] == "has":
+            filtered_rows = [row for row in filtered_rows if row[0] in drafts_by_posting]
+        else:
+            filtered_rows = [row for row in filtered_rows if row[0] not in drafts_by_posting]
+
     return all_rows, filtered_rows
 
 
@@ -846,9 +1379,9 @@ def index():
     init_schema(conn)
 
     filters = _parse_filters(request.args)
-    all_rows, filtered_rows = _filtered_postings(conn, filters)
-
     drafts_by_posting = drafts_db.latest_draft_index(conn)
+    all_rows, filtered_rows = _filtered_postings(conn, filters, drafts_by_posting)
+
     companies = _distinct_companies(conn)
     filter_bar = _filter_bar_html(filters, companies)
 
@@ -887,6 +1420,9 @@ def index():
         )
         cards.append(
             f"""<div class="card">
+  <label class="card__select" style="font-size:12px;color:var(--ink-faint);display:flex;align-items:center;gap:6px;">
+    <input type="checkbox" name="posting_ids" value="{posting_id}" form="batch-form" onchange="updateBatchBar()"> select
+  </label>
   <div class="card__company">{_esc(company)}</div>
   <h3 class="card__title">{_esc(title)}</h3>
   <div class="card__meta">{_esc(location or 'Location n/a')} &middot; status: {_esc(status)}</div>
@@ -910,9 +1446,21 @@ def index():
     <p class="sub">{total} posting(s) match &middot; {len(all_rows)} total (excluding stale) &middot; {add_manual_link}</p></div>
   {filter_bar}
   {score_batch_form}
+  <form method="post" action="{url_for('batch_generate_confirm')}" id="batch-form" class="score-batch-bar">
+    <span>Select postings above, then generate resume + cover letter for each in sequence.</span>
+    <button class="btn btn--small" type="submit" id="batch-generate-btn" disabled>Generate selected (0)</button>
+  </form>
+  <p class="sub" style="margin-top:-14px;margin-bottom:16px;">Selection only applies to postings shown on this page (pagination isn't select-all-aware yet).</p>
   <div class="grid">{''.join(cards)}</div>
   {pagination_html}
-</div>"""
+</div>
+<script>
+function updateBatchBar() {{
+  const checked = document.querySelectorAll('input[name="posting_ids"][form="batch-form"]:checked').length;
+  const btn = document.getElementById("batch-generate-btn");
+  if (btn) {{ btn.textContent = "Generate selected (" + checked + ")"; btn.disabled = checked === 0; }}
+}}
+</script>"""
     return _page("Postings", body)
 
 
@@ -979,11 +1527,20 @@ def posting_detail(posting_id):
 <p class="sub" style="margin-top:10px;">Generated {_esc(draft.generated_at)} &middot; {draft.revision_rounds + 1} round(s)</p>"""
 
     active_job = _active_generate_job_for_posting(posting_id)
+    active_batch = _active_batch_job_for_posting(posting_id) if active_job is None else None
 
     jd_full = _esc(posting["description"])
     regenerate_label = "Regenerate" if draft is not None else "Generate draft"
 
-    if active_job is not None:
+    if active_batch is not None:
+        gen_form = f"""<details style="margin-top:24px;"><summary style="cursor:pointer;font-weight:600;">Job description (stored)</summary>
+  <p class="sub" style="white-space:pre-wrap;">{jd_full}</p></details>
+<div class="progress-panel" style="margin-top:16px;">
+  <p style="font-weight:600;margin:0 0 6px;">Part of a batch generation currently running</p>
+  <p class="sub">This posting is queued as part of a multi-posting batch (running one at a time).
+  <a href="{url_for('job_status_page', job_id=active_batch['job_id'])}">View batch progress</a></p>
+</div>"""
+    elif active_job is not None:
         total_steps = active_job.get("total_steps") or 0
         step = active_job.get("step") or 0
         pct = int(100 * step / total_steps) if total_steps else 0
@@ -1082,6 +1639,168 @@ def generate(posting_id):
     return redirect(url_for("posting_detail", posting_id=posting_id))
 
 
+@app.route("/postings/batch-generate/confirm", methods=["POST"])
+def batch_generate_confirm():
+    """Confirmation step between the postings-index checkboxes and
+    actually starting the batch job -- explicit user decision, not a
+    convenience skip that was assumed. Any selected posting that
+    ALREADY has a draft is flagged with a note and left checked by
+    default (batch generation adds a new draft row, same as clicking
+    Regenerate today -- it never overwrites), but you can uncheck it
+    here before anything actually runs.
+
+    Selected postings with no stored job description are silently
+    excluded from the checklist below and listed read-only instead --
+    batch generation has no per-posting paste step, so there's no
+    reasonable way to collect a description for them here; open them
+    individually to add one first."""
+    posting_ids = [int(x) for x in request.form.getlist("posting_ids") if x.isdigit()]
+    if not posting_ids:
+        return redirect(url_for("index"))
+
+    conn = get_connection()
+    init_schema(conn)
+    drafts_by_posting = drafts_db.latest_draft_index(conn)
+
+    ready_rows = []
+    skipped_rows = []
+    for pid in posting_ids:
+        posting = _get_posting(conn, pid)
+        if posting is None:
+            continue
+        if not posting["description"]:
+            skipped_rows.append(posting)
+            continue
+        ready_rows.append((posting, drafts_by_posting.get(pid)))
+
+    if not ready_rows:
+        body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Batch generation</h1></div>
+  <p>None of the selected posting(s) have a stored job description, so there's nothing to batch-generate.
+  Open each one individually to paste a description first.</p>
+  <p><a class="btn btn--small btn--secondary" href="{url_for('index')}">Back to postings</a></p>
+</div>"""
+        return _page("Batch generation", body)
+
+    items_html = []
+    for posting, draft in ready_rows:
+        note = ""
+        if draft is not None:
+            note = (
+                f'<br><span class="sub" style="color:#b00020;">already has a draft '
+                f'(generated {_esc(draft.generated_at)}) &mdash; this will add a NEW draft, not overwrite it</span>'
+            )
+        items_html.append(f"""<div class="card" style="padding:12px 16px;">
+  <label style="display:flex;align-items:flex-start;gap:10px;">
+    <input type="checkbox" name="posting_ids" value="{posting['id']}" checked style="margin-top:3px;">
+    <span><strong>{_esc(posting['company'])}</strong> &mdash; {_esc(posting['title'])}{note}</span>
+  </label>
+</div>""")
+
+    skipped_html = ""
+    if skipped_rows:
+        skipped_items = "".join(
+            f'<li><a href="{url_for("posting_detail", posting_id=p["id"])}">{_esc(p["company"])} '
+            f'&mdash; {_esc(p["title"])}</a> (no job description stored)</li>'
+            for p in skipped_rows
+        )
+        skipped_html = f"""<div class="sub" style="margin-top:20px;">
+  <p>{len(skipped_rows)} selected posting(s) skipped &mdash; no job description stored:</p>
+  <ul>{skipped_items}</ul>
+</div>"""
+
+    body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Confirm batch generation</h1></div>
+  <p class="sub">Generates one posting at a time, in the order below &mdash; not in parallel, to protect the
+  local model's KV cache. This can take a while for several postings; you'll get a real progress view once it starts.</p>
+  <form method="post" action="{url_for('batch_generate_start')}">
+    <div class="grid" style="grid-template-columns:1fr;gap:8px;">{''.join(items_html)}</div>
+    {_generate_options_html()}
+    <p class="sub" style="margin-top:6px;">These settings apply to every posting in this batch.</p>
+    <div class="btn-row" style="margin-top:14px;">
+      <button class="btn" type="submit">Start batch generation</button>
+      <a class="btn btn--secondary" href="{url_for('index')}">Cancel</a>
+    </div>
+  </form>
+  {skipped_html}
+</div>"""
+    return _page("Confirm batch generation", body)
+
+
+@app.route("/postings/batch-generate/start", methods=["POST"])
+def batch_generate_start():
+    """Starts the actual background thread -- only reached from
+    batch_generate_confirm()'s form, after the user has seen and
+    confirmed the exact posting list (including any already-drafted
+    ones they chose to keep checked)."""
+    posting_ids = [int(x) for x in request.form.getlist("posting_ids") if x.isdigit()]
+    if not posting_ids:
+        return redirect(url_for("index"))
+
+    try:
+        revision_rounds = int(request.form.get("revision_rounds", 1))
+    except ValueError:
+        revision_rounds = 1
+    think = request.form.get("think") == "on"
+    stability = request.form.get("stability") or "balanced"
+    if stability not in ("strict", "balanced", "loose"):
+        stability = "balanced"
+
+    conn = get_connection()
+    init_schema(conn)
+    items = []
+    for pid in posting_ids:
+        posting = _get_posting(conn, pid)
+        if posting is not None and posting["description"]:
+            items.append({
+                "posting_id": pid, "company": posting["company"],
+                "title": posting["title"], "description": posting["description"],
+            })
+
+    if not items:
+        return redirect(url_for("index"))
+
+    job_id = uuid.uuid4().hex[:12]
+    _set_job(
+        job_id, status="queued", kind="batch_generate",
+        posting_ids=[it["posting_id"] for it in items], total=len(items),
+    )
+    thread = threading.Thread(
+        target=_run_batch_generation,
+        args=(job_id, items, revision_rounds, think, stability),
+        daemon=True,
+    )
+    thread.start()
+    return redirect(url_for("job_status_page", job_id=job_id))
+
+
+@app.route("/jobs/<job_id>/cancel", methods=["POST"])
+def cancel_job_route(job_id):
+    """Requests cancellation of a running/queued job -- sets a flag the
+    job's own loop checks at its next safe point (between postings for
+    batch_generate/score_batch, between URLs for dead_link_check, between
+    companies for scout). This is a REQUEST, not an interrupt: the item
+    currently in flight (an LLM call, an HTTP check, a company's fetch)
+    still finishes; nothing stops mid-call.
+
+    Scout support added 2026-08-23 once detector.py's run_scout() gained
+    a should_stop hook (checked once per company, same boundary
+    on_company_done already fires at) -- see run_scout()'s own docstring.
+
+    Single-posting 'generate' support added same day via a different
+    mechanism (see _JobCancelled's docstring): no Python-level loop to
+    check between iterations here, so cancellation is raised from inside
+    the on_step callback instead. NOT CONFIRMED LIVE that run_revision_loop()
+    actually lets that exception through rather than swallowing it
+    internally (revision.py wasn't uploaded this session) -- test this
+    one specifically before trusting it."""
+    job = _get_job(job_id)
+    if job is not None and job.get("kind") in ("batch_generate", "score_batch", "dead_link_check", "scout", "generate"):
+        _set_job(job_id, cancel_requested=True)
+    redirect_to = request.form.get("redirect_to") or url_for("jobs_index")
+    return redirect(redirect_to)
+
+
 @app.route("/scout/run", methods=["POST"])
 def run_scout_route():
     """2026-08-10: dashboard-triggered Scout, reversing the CLI-only
@@ -1166,7 +1885,7 @@ def dead_links_results(job_id):
     job = _get_job(job_id)
     if job is None or job.get("kind") != "dead_link_check":
         abort(404)
-    if job.get("status") != "done":
+    if job.get("status") not in ("done", "cancelled", "interrupted"):
         return redirect(url_for("job_status_page", job_id=job_id))
 
     dead = job.get("dead", [])
@@ -1369,11 +2088,105 @@ def job_status_page(job_id):
     job = _get_job(job_id)
     if job is None:
         abort(404)
+
+    if job.get("kind") == "batch_generate":
+        # Dedicated rendering, not the generic spinner-wrap template below --
+        # this is the one job kind the user explicitly asked to see two REAL
+        # progress bars for (outer: which posting; inner: that posting's own
+        # step/total_steps, same contract _run_generation() uses for the
+        # single-posting case), plus a running results list as each posting
+        # finishes -- not just a final summary line.
+        total = job.get("total") or 0
+        batch_index = job.get("batch_index") or 0
+        step = job.get("step") or 0
+        total_steps = job.get("total_steps") or 0
+        cancel_form = ""
+        if job.get("status") in ("queued", "running"):
+            cancel_form = f"""<form method="post" action="{url_for('cancel_job_route', job_id=job_id)}" id="batch-cancel-form"
+  style="margin-bottom:14px;"
+  onsubmit="return confirm('Cancel this batch? It stops after the current posting finishes, not instantly.');">
+  <input type="hidden" name="redirect_to" value="{url_for('job_status_page', job_id=job_id)}">
+  <button class="btn btn--secondary btn--small" type="submit" style="color:#b00020;border-color:#b00020;">Cancel batch</button>
+</form>"""
+        body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Batch generation</h1></div>
+  {cancel_form}
+  <div class="progress-panel">
+    <p style="font-weight:600;margin:0 0 6px;">Posting <span id="batch-idx">{batch_index}</span> of <span id="batch-total">{total}</span></p>
+    <progress id="batch-progress" value="{batch_index}" max="{total or 1}" style="width:100%;height:10px;"></progress>
+    <p id="batch-current" class="sub" style="margin-top:6px;"></p>
+  </div>
+  <div class="progress-panel" style="margin-top:16px;">
+    <p style="font-weight:600;margin:0 0 6px;">Current posting</p>
+    <progress id="item-progress" value="{step}" max="{total_steps or 1}" style="width:100%;height:10px;"></progress>
+    <p id="item-current" class="sub" style="margin-top:6px;"></p>
+  </div>
+  <div id="batch-results" style="margin-top:20px;"></div>
+  <p id="batch-done-line" style="margin-top:16px;"></p>
+</div>
+<script>
+async function pollBatch() {{
+  const r = await fetch("{url_for('job_status_json', job_id=job_id)}");
+  if (!r.ok) {{ setTimeout(pollBatch, 2500); return; }}
+  const j = await r.json();
+
+  document.getElementById("batch-idx").textContent = j.batch_index || 0;
+  document.getElementById("batch-total").textContent = j.total || 0;
+  const batchBar = document.getElementById("batch-progress");
+  if (batchBar) {{ batchBar.max = j.total || 1; batchBar.value = j.batch_index || 0; }}
+  document.getElementById("batch-current").textContent =
+    j.current_company ? (j.current_company + (j.current_title ? " \\u2014 " + j.current_title : "")) : "";
+
+  const itemBar = document.getElementById("item-progress");
+  if (itemBar && j.total_steps) {{ itemBar.max = j.total_steps; itemBar.value = j.step || 0; }}
+  document.getElementById("item-current").textContent =
+    (j.current || "working\\u2026") + (j.total_steps ? " (" + (j.step || 0) + "/" + j.total_steps + ")" : "");
+
+  const results = j.results || [];
+  const resultsEl = document.getElementById("batch-results");
+  if (results.length) {{
+    resultsEl.innerHTML = "<p style='font-weight:600;margin:0 0 6px;'>Completed so far</p>" +
+      results.map(function(r) {{
+        return r.status === "done"
+          ? '<div class="sub">\\u2713 ' + r.company + ' \\u2014 ' + r.title + '</div>'
+          : '<div class="sub" style="color:#b00020;">\\u2717 ' + r.company + ' \\u2014 ' + r.title + ': ' + r.error + '</div>';
+      }}).join("");
+  }}
+
+  if (j.status === "done" || j.status === "cancelled" || j.status === "interrupted") {{
+    const cancelForm = document.getElementById("batch-cancel-form");
+    if (cancelForm) cancelForm.style.display = "none";
+    let prefix = "<strong>Done.</strong> ";
+    if (j.status === "cancelled") prefix = "<strong>Cancelled.</strong> ";
+    if (j.status === "interrupted") prefix = "<strong>Interrupted by a dashboard restart.</strong> ";
+    document.getElementById("batch-done-line").innerHTML =
+      prefix + (j.succeeded || 0) + " succeeded, " + (j.failed || 0) + " failed" +
+      ((j.status === "cancelled" || j.status === "interrupted") ? ", " + ((j.total || 0) - ((j.results || []).length)) + " not run" : "") + ". " +
+      '<a class="btn btn--small" href="{url_for("index")}">Back to postings</a>';
+    return;
+  }} else if (j.status === "error") {{
+    document.getElementById("batch-done-line").textContent = "Batch failed: " + j.error;
+    return;
+  }}
+  setTimeout(pollBatch, 2000);
+}}
+pollBatch();
+</script>"""
+        return _page("Batch generation", body)
+
     body = f"""<div class="dash-wrap"><div class="spinner-wrap">
   <div class="spinner"></div>
   <p id="status">Starting…</p>
   <p id="detail" style="font-size:13px;color:var(--ink-faint);"></p>
   <p id="done-link"></p>
+  <div id="cancel-wrap">{
+    f'''<form method="post" action="{url_for("cancel_job_route", job_id=job_id)}" id="generic-cancel-form"
+  style="margin-top:12px;" onsubmit="return confirm('Cancel this job? It stops after the current item finishes, not instantly.');">
+  <input type="hidden" name="redirect_to" value="{url_for("job_status_page", job_id=job_id)}">
+  <button class="btn btn--secondary btn--small" type="submit" style="color:#b00020;border-color:#b00020;">Cancel</button></form>'''
+    if job.get("kind") in ("batch_generate", "score_batch", "dead_link_check", "scout", "generate")
+    and job.get("status") in ("queued", "running") else ""
+  }</div>
 </div></div>
 <script>
 async function poll() {{
@@ -1382,9 +2195,14 @@ async function poll() {{
   const el = document.getElementById("status");
   const detailEl = document.getElementById("detail");
   const linkEl = document.getElementById("done-link");
+  const cancelForm = document.getElementById("generic-cancel-form");
 
-  if (j.status === "done") {{
-    if (j.kind === "generate") {{
+  if (j.status === "done" || j.status === "cancelled" || j.status === "interrupted") {{
+    if (cancelForm) cancelForm.style.display = "none";
+    let cancelledPrefix = "";
+    if (j.status === "cancelled") cancelledPrefix = "Cancelled. ";
+    if (j.status === "interrupted") cancelledPrefix = "Interrupted by a dashboard restart. ";
+    if (j.status === "done" && j.kind === "generate") {{
       window.location = "/postings/" + j.posting_id;
       return;
     }}
@@ -1393,18 +2211,25 @@ async function poll() {{
       return;
     }}
     if (j.kind === "score_batch") {{
-      el.textContent = "Done.";
+      el.textContent = cancelledPrefix + "Done.";
       detailEl.textContent = `Scored ${{j.scored}}, skipped ${{j.skipped}}, of ${{j.total}} filtered posting(s).`;
     }} else if (j.kind === "scout") {{
-      el.textContent = "Done.";
+      el.textContent = cancelledPrefix + "Done.";
       detailEl.textContent = `${{j.companies_checked}} companies checked, ${{j.new_postings}} new posting(s)` +
         (j.error_count ? `, ${{j.error_count}} error(s) -- see run_log for detail.` : ".");
+    }} else if (j.kind === "generate" && (j.status === "cancelled" || j.status === "interrupted")) {{
+      el.textContent = cancelledPrefix + "No draft was saved.";
+      linkEl.innerHTML = j.posting_id
+        ? '<a class="btn btn--small" href="/postings/' + j.posting_id + '">Back to posting</a>'
+        : '<a class="btn btn--small" href="{url_for("index")}">Back to postings</a>';
+      return;
     }} else {{
-      el.textContent = "Done.";
+      el.textContent = cancelledPrefix + "Done.";
     }}
     linkEl.innerHTML = '<a class="btn btn--small" href="{url_for("index")}">View postings</a>';
     return;
   }} else if (j.status === "error") {{
+    if (cancelForm) cancelForm.style.display = "none";
     el.textContent = "Failed: " + j.error;
     return;
   }} else if (j.kind === "score_batch") {{
@@ -1777,6 +2602,7 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
+    _load_jobs_from_db()
     # threaded=True: required -- the index/detail pages must stay
     # responsive to GET/poll requests while a background generation
     # thread is running, not just while Flask itself avoids blocking.
