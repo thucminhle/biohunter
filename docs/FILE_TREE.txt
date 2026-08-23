@@ -36,24 +36,24 @@
 │   │   └── biotech-job-hunter-design.md
 │   ├── handoffs
 │   │   ├── 2026-07-26-phase1-scout-complete.md
-│   │   ├── 2026-07-29-phase1-registry-complete.md
-│   │   ├── 2026-07-29-registry-8of10-adr3-drafted.md
+│   │   ├── 2026-07-29_1_-phase1-registry-complete.md
+│   │   ├── 2026-07-29_2_-registry-8of10-adr3-drafted.md
 │   │   ├── 2026-08-04-resume-pipeline-e2e-complete.md
-│   │   ├── 2026-08-05-n8n-python-parity-debugging.md
-│   │   ├── 2026-08-05-native-pipeline-port-step1-in-progress.md
-│   │   ├── 2026-08-05-starting-native-pipeline-port.md
+│   │   ├── 2026-08-05_1_-native-pipeline-port-step1-in-progress.md
+│   │   ├── 2026-08-05_2_-n8n-python-parity-debugging.md
+│   │   ├── 2026-08-05_3_-starting-native-pipeline-port.md
 │   │   ├── 2026-08-06_BioHunter-Phase-2-Development.md
-│   │   ├── 2026-08-07_BioHunter-Critic-Revision-Loop-Handoff.md
-│   │   ├── 2026-08-07_BioHunter-Diff-Score-BulletFix-Handoff.md
+│   │   ├── 2026-08-07_1_BioHunter-Critic-Revision-Loop-Handoff.md
+│   │   ├── 2026-08-07_2_BioHunter-Diff-Score-BulletFix-Handoff.md
 │   │   ├── 2026-08-09_BioHunter-Dashboard-Filtering-ManualAdd-Handoff.md
 │   │   ├── 2026-08-10_1_BioHunter-Scorer-DescriptionFetch-PreFilter-Handoff.md
 │   │   ├── 2026-08-10_2_BioHunter-PreFilter-ScorerModelFix-DashboardButtons-Handoff.md
 │   │   ├── 2026-08-10_3_BioHunter-4b-BrowserConfirmed-ScoutProgress-Handoff.md
 │   │   ├── 2026-08-10_4_BioHunter-ScoutProgressConfirmedLive-Handoff.md
+│   │   ├── 2026-08-11_1_BioHunter-DeadLinkChecker-ATSNuances-Handoff.md
 │   │   ├── 2026-08-11_2_BioHunter-DeadLinkChecker-403Fix-CompanyBreakdown-Handoff.md
-│   │   ├── 2026-08-11_BioHunter-DeadLinkChecker-ATSNuances-Handoff.md
+│   │   ├── 2026-08-13_1_BioHunter-GreenhouseFixConfirmed-RepostTracking-Handoff.md
 │   │   ├── 2026-08-13_2_BioHunter-JobsynFixConfirmed-MVPRefocus-Handoff.md
-│   │   ├── 2026-08-13_BioHunter-GreenhouseFixConfirmed-RepostTracking-Handoff.md
 │   │   ├── 2026-08-14_1_BioHunter-DeviationControl-ProgressNotify-RoadmapHandoff.md
 │   │   ├── 2026-08-14_2_BioHunter-SubsystemPlanning-ScoutHandoff.md
 │   │   ├── 2026-08-15_1_BioHunter-DiscoverAts-CustomAPIAdapter-Handoff.md
@@ -61,9 +61,10 @@
 │   │   ├── 2026-08-15_3_BioHunter-CustomAPIVerified-AbbVieGeoFilter-PacificBiolabsFix-Handoff.md
 │   │   ├── 2026-08-15_4_BioHunter-DescriptionBackfill-ScorePostingsConfirmedLive-Handoff.md
 │   │   ├── 2026-08-15_5_BioHunter-AbbVieBayAreaFix-PaginationRootCauseParked-Handoff.md
+│   │   ├── 2026-08-17_1_BioHunter-ExtensionCaptureLive-LLMExtractionScoped-Handoff.md
 │   │   ├── 2026-08-17_2_BioHunter-ExtensionExtractionFixed-DeleteRouteBuilt-ScoutComplete-Handoff.md
-│   │   ├── 2026-08-17_BioHunter-ExtensionCaptureLive-LLMExtractionScoped-Handoff.md
-│   │   └── 2026-08-23_BioHunter-CaptainBatchGeneratePersistedJobs-Handoff.md
+│   │   ├── 2026-08-23_1_BioHunter-CaptainBatchGeneratePersistedJobs-Handoff.md
+│   │   └── 2026-08-23_2_BioHunter-TokenUsageDashboard-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md

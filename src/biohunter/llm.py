@@ -1,10 +1,60 @@
+"""
+llm.py -- 2026-08-23 addition: token usage / generation-speed capture for
+the token-usage mini-dashboard (see dashboard.py's module docstring,
+2026-08-23 entry, which explicitly deferred this pending llm.py being
+available to edit).
+
+Nothing about the PUBLIC call shape changes: every existing caller
+(selection.py's 6 call sites, critic.py's 1, scorer.py's 1) calls
+llm.complete(role, messages, ...) exactly as before and only ever reads
+response.text -- none of them need to change. Two additions only:
+
+1. LLMResponse gains three new OPTIONAL fields (prompt_tokens,
+   completion_tokens, elapsed_seconds), populated best-effort per
+   backend from whatever that API actually returns. All three default
+   to None -- a backend/server that doesn't report usage (some MLX
+   servers, per OpenAICompatibleClient's existing "NOT YET VERIFIED"
+   comment) degrades to None fields, not a crash or a fabricated 0.
+2. LLMClient.__init__ takes an optional `usage_callback` -- if given,
+   it's invoked as usage_callback(role, response) after every
+   backend.chat() call, success or not attempted otherwise. This is the
+   ONLY new integration point a caller needs: dashboard.py passes a
+   closure that accumulates into a job dict via _set_job(), matching
+   the same optional-callback pattern on_step already uses in
+   writer.py/revision.py. None (the default) is a no-op for every
+   existing caller -- CLI, tests, etc. -- zero behavior change.
+
+Per-backend usage sourcing, each best-effort and independently:
+- AnthropicClient: response.usage.input_tokens / .output_tokens (the
+  Anthropic SDK always returns this on messages.create()). No
+  elapsed_seconds from the SDK response itself; wall-clock timed around
+  the call instead, same technique used for the other two backends.
+- OllamaNativeClient: native /api/chat's response body carries
+  prompt_eval_count / eval_count (token counts) and eval_duration (
+  nanoseconds, generation time only -- excludes prompt-eval time,
+  which is what a "tokens/sec generation speed" stat actually wants).
+  All three are OPTIONAL per Ollama's own docs depending on server
+  version/model -- .get() throughout, never indexed.
+- OpenAICompatibleClient: OpenAI-compatible /v1/chat/completions
+  SHOULD return a top-level "usage": {"prompt_tokens":..,
+  "completion_tokens":..} block, but per this module's own prior
+  comment this has never been verified against a real MLX/oMLX server
+  -- .get()'d defensively, None fields if absent rather than assuming
+  the shape.
+
+elapsed_seconds is wall-clock timed around the HTTP call in every
+backend (not trusted to any single API's self-reported duration field,
+which not all three expose), so it's directly comparable across
+backends for a "tokens/sec" computation regardless of provider.
+"""
 from __future__ import annotations
 
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import requests
 import yaml
@@ -15,6 +65,30 @@ class LLMResponse:
     text: str
     model: str
     provider: str
+    # New 2026-08-23, all optional -- see module docstring for per-backend
+    # sourcing and why None (not 0) is the "unknown" value throughout.
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    elapsed_seconds: float | None = None
+
+    @property
+    def total_tokens(self) -> int | None:
+        if self.prompt_tokens is None and self.completion_tokens is None:
+            return None
+        return (self.prompt_tokens or 0) + (self.completion_tokens or 0)
+
+    @property
+    def tokens_per_second(self) -> float | None:
+        """Completion-token generation speed -- the number most people
+        mean by 'tokens/sec'. None if either completion_tokens or
+        elapsed_seconds is unknown, or elapsed_seconds is ~0 (avoids a
+        divide-by-zero on a suspiciously-instant response rather than
+        reporting a meaningless huge number)."""
+        if self.completion_tokens is None or not self.elapsed_seconds:
+            return None
+        if self.elapsed_seconds <= 0:
+            return None
+        return self.completion_tokens / self.elapsed_seconds
 
 
 class LLMBackend(Protocol):
@@ -45,14 +119,30 @@ class AnthropicClient:
             else:
                 convo.append(m)
 
+        start = time.monotonic()
         response = self._client.messages.create(
             model=model,
             max_tokens=kwargs.get("max_tokens", 2000),
             system=system,
             messages=convo,
         )
+        elapsed = time.monotonic() - start
+
         text = "".join(block.text for block in response.content if block.type == "text")
-        return LLMResponse(text=text, model=model, provider="anthropic")
+
+        # response.usage is always present on a successful messages.create()
+        # call per the Anthropic SDK's own contract, but .get()-style
+        # defensive access costs nothing and matches this module's
+        # treatment of the other two (less reliable) backends.
+        usage = getattr(response, "usage", None)
+        prompt_tokens = getattr(usage, "input_tokens", None) if usage else None
+        completion_tokens = getattr(usage, "output_tokens", None) if usage else None
+
+        return LLMResponse(
+            text=text, model=model, provider="anthropic",
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            elapsed_seconds=elapsed,
+        )
 
 
 class OllamaNativeClient:
@@ -120,15 +210,33 @@ class OllamaNativeClient:
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
+        start = time.monotonic()
         resp = requests.post(
             f"{self._base_url}/api/chat", json=payload, headers=headers, timeout=timeout
         )
+        wall_elapsed = time.monotonic() - start
         resp.raise_for_status()
         data = resp.json()
         # Native /api/chat's response shape: {"message": {"role":..., "content":...}, "done":..., ...}
         # -- no "choices" wrapper, unlike the OpenAI-compatible shape.
         text = data.get("message", {}).get("content", "")
-        return LLMResponse(text=text, model=model, provider=self._base_url)
+
+        prompt_tokens = data.get("prompt_eval_count")
+        completion_tokens = data.get("eval_count")
+        # eval_duration is nanoseconds and covers GENERATION only (excludes
+        # prompt eval), which is exactly what a tokens/sec generation-speed
+        # stat wants -- prefer it over wall_elapsed when present. Falls back
+        # to wall-clock (includes prompt eval + network) if the server
+        # didn't report it, so tokens_per_second still degrades gracefully
+        # rather than going fully None.
+        eval_duration_ns = data.get("eval_duration")
+        elapsed = (eval_duration_ns / 1e9) if eval_duration_ns else wall_elapsed
+
+        return LLMResponse(
+            text=text, model=model, provider=self._base_url,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            elapsed_seconds=elapsed,
+        )
 
 
 class OpenAICompatibleClient:
@@ -194,13 +302,28 @@ class OpenAICompatibleClient:
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
+        start = time.monotonic()
         resp = requests.post(
             f"{self._base_url}/chat/completions", json=payload, headers=headers, timeout=timeout
         )
+        elapsed = time.monotonic() - start
         resp.raise_for_status()
         data = resp.json()
         text = data["choices"][0]["message"]["content"]
-        return LLMResponse(text=text, model=model, provider=self._base_url)
+
+        # Best-effort only -- see module docstring, this shape is not
+        # confirmed against a real MLX/oMLX server yet. .get() throughout,
+        # never indexed, so an absent/differently-shaped usage block
+        # degrades to None fields rather than a KeyError.
+        usage = data.get("usage") or {}
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+
+        return LLMResponse(
+            text=text, model=model, provider=self._base_url,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            elapsed_seconds=elapsed,
+        )
 
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{(\w+)\}")
@@ -228,6 +351,7 @@ class LLMClient:
         self,
         roles_path: str | Path = "config/roles.yaml",
         overrides: dict[str, str] | None = None,
+        usage_callback: Callable[[str, LLMResponse], None] | None = None,
     ) -> None:
         with open(roles_path) as f:
             self._roles: dict[str, dict] = yaml.safe_load(f)
@@ -236,6 +360,16 @@ class LLMClient:
         # (wired in cli.py) and wins over whatever roles.yaml says for
         # that role, for this run only.
         self._overrides = overrides or {}
+
+        # New 2026-08-23: optional per-instance hook, called as
+        # usage_callback(role, response) after every complete() call
+        # that got a response back (i.e. not called if backend.chat()
+        # itself raised -- a failed call has no usage to report).
+        # dashboard.py's job runners pass a closure here that
+        # accumulates into that job's dict via _set_job(); every other
+        # existing caller (CLI, tests) passes nothing and gets the
+        # exact same behavior as before this feature existed.
+        self._usage_callback = usage_callback
 
         # Backends are a little expensive to construct (Anthropic does
         # auth setup on init) and safe to share across every role that
@@ -314,4 +448,21 @@ class LLMClient:
             kwargs.setdefault("num_ctx", num_ctx)
 
         backend = self._get_backend(provider, base_url, api_key)
-        return backend.chat(messages, model=model, **kwargs)
+        response = backend.chat(messages, model=model, **kwargs)
+
+        if self._usage_callback is not None:
+            # Best-effort, same posture as _persist_job()'s try/except in
+            # dashboard.py: a broken callback (e.g. a dashboard bug in the
+            # accumulation closure) must never take down the actual LLM
+            # call that already succeeded and whose text a caller is
+            # about to use.
+            try:
+                self._usage_callback(role, response)
+            except Exception:  # noqa: BLE001
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "usage_callback raised for role '%s' -- ignoring, response is still returned", role
+                )
+
+        return response

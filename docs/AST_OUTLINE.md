@@ -477,6 +477,56 @@ def parse_score(critique_text: str) -> ScoreResult:
 # (POST /jobs/<id>/delete, POST /jobs/clear) only ever remove
 # finished/cancelled/interrupted jobs -- an active job is never deletable
 # out from under its own running thread.
+#
+# 2026-08-23 addition, continued (Captain items #3 and #4): two more
+# roadmap items closed this same session, per direct request.
+#
+# - **Unified progress-bar contract (#3).** A single new helper,
+#   _job_progress_fraction(job) -> float, computes a 0..1 completion
+#   fraction from whatever fields that job's kind already writes (no new
+#   per-kind state). Used in exactly two places, both server-side single
+#   source of truth: job_status_json() now returns a "progress_fraction"
+#   key alongside the raw job dict, and the generic spinner-wrap template
+#   in job_status_page() (previously text-only for generate/score_batch/
+#   scout/dead_link_check -- only batch_generate had a real <progress>
+#   element) now renders one <progress> bar whose value poll()'s JS sets
+#   from that same field, uniformly, instead of four kind-specific bar
+#   implementations. jobs_index() also renders a real bar per active job
+#   card now (previously text-only there too), and the page is now split
+#   into an "Active now" section (real bars, live progress) above the
+#   full "History" list, functioning as the multi-job mini-dashboard
+#   requested -- so someone who kicked off scout + score-batch + a
+#   generate batch together can see all three progressing at once
+#   without opening three tabs. Token usage / token generation speed
+#   were also requested for this mini-dashboard but are NOT built yet --
+#   llm.py hasn't been uploaded in this thread, so it's unknown whether
+#   the LLMClient response object even carries token counts (selection.py
+#   only ever reads response.text). Deferred, not forgotten -- see
+#   _job_progress_fraction()'s docstring for the intended extension point.
+# - **Combined Scout + dead-link-check job (#4).** New kind
+#   "scout_and_check", new route (POST /scout-and-check/run), new runner
+#   _run_scout_and_check_job(). Runs Scout to completion first (same
+#   on_company_done/should_stop mechanism _run_scout_job() already uses),
+#   then -- unless cancelled mid-scout -- immediately runs the dead-link
+#   sweep over every non-stale posting, same mechanism
+#   _run_dead_link_check_job() already uses. Deliberately duplicates
+#   those two functions' loop bodies rather than refactoring them to share
+#   code: both are already confirmed live from earlier this session, and
+#   the smaller/safer change here is new code alongside them, not an edit
+#   to a path that already works. The dead-link half's human-in-the-loop
+#   review gate is UNCHANGED -- this combined job still only ever
+#   populates the job dict's "dead"/"uncertain" lists; POST
+#   /postings/mark-stale, reached via dead_links_results() (now accepting
+#   kind "scout_and_check" too, not just "dead_link_check"), remains the
+#   only route that actually writes status='stale'. Explicit choice, not
+#   a default: a real dead-link sweep still runs at ~16% inconclusive per
+#   the first live run of that feature, and auto-marking stale without a
+#   person looking would risk quietly hiding postings that are still
+#   live. The postings-index "Run Scout" and "Check for dead links"
+#   buttons are replaced by one combined button; the two old routes
+#   (/scout/run, /postings/check-dead-links) and their runners are left
+#   in place, reachable directly, not deleted -- only the UI's default
+#   path changed.
 
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
@@ -484,6 +534,14 @@ POSTINGS_PER_PAGE = 60
 _jobs: dict[str, dict] = {}
 _ACTIVE_STATUSES = ('queued', 'running')
 def _set_job(job_id: str) -> None:
+    ...
+
+def _make_usage_callback(job_id: str):
+    """Returns a closure for LLMClient(usage_callback=...) that"""
+    ...
+
+def _log_token_usage(kind: str, job_id: str) -> None:
+    """Reads job_id's accumulated totals (written by _make_usage_callback()'s"""
     ...
 
 def _get_job(job_id: str) -> dict | None:
@@ -531,6 +589,14 @@ def delete_job_route(job_id):
 def clear_jobs_route():
     ...
 
+def _job_progress_fraction(job: dict) -> float:
+    """Single source of truth for "how far along is this job, 0..1" --"""
+    ...
+
+def _format_token_suffix(job: dict) -> str:
+    """Shared by every LLM-calling kind's detail line. Empty string"""
+    ...
+
 def _job_display(job_id: str, job: dict) -> tuple[str, str, str]:
     """Single source of truth for how a job shows up in BOTH jobs_index()"""
     ...
@@ -553,6 +619,10 @@ def _run_scout_job(job_id: str) -> None:
 
 def _run_dead_link_check_job(job_id: str, posting_rows: list[tuple]) -> None:
     """Runs in a background thread, started by POST /postings/check-dead-links."""
+    ...
+
+def _run_scout_and_check_job(job_id: str) -> None:
+    """Runs in a background thread, started by POST /scout-and-check/run."""
     ...
 
 def _get_posting(conn, posting_id: int) -> dict | None:
@@ -619,6 +689,10 @@ def run_scout_route():
     """2026-08-10: dashboard-triggered Scout, reversing the CLI-only"""
     ...
 
+def scout_and_check_route():
+    """Combined Scout + dead-link-check, Captain roadmap item #4. Same"""
+    ...
+
 def score_batch_route():
     """2026-08-10: dashboard-triggered Scorer over the CURRENT filter set"""
     ...
@@ -674,6 +748,10 @@ def settings_page():
     ...
 
 def settings_save():
+    ...
+
+def tokens_dashboard():
+    """Aggregates run_log's tokens_used column -- now populated by every"""
     ...
 
 def main() -> None:
@@ -954,10 +1032,68 @@ def latest_draft_index(conn) -> dict[int, DraftRecord]:
 
 ## `src/biohunter/llm.py`
 ```python
+# llm.py -- 2026-08-23 addition: token usage / generation-speed capture for
+# the token-usage mini-dashboard (see dashboard.py's module docstring,
+# 2026-08-23 entry, which explicitly deferred this pending llm.py being
+# available to edit).
+#
+# Nothing about the PUBLIC call shape changes: every existing caller
+# (selection.py's 6 call sites, critic.py's 1, scorer.py's 1) calls
+# llm.complete(role, messages, ...) exactly as before and only ever reads
+# response.text -- none of them need to change. Two additions only:
+#
+# 1. LLMResponse gains three new OPTIONAL fields (prompt_tokens,
+#    completion_tokens, elapsed_seconds), populated best-effort per
+#    backend from whatever that API actually returns. All three default
+#    to None -- a backend/server that doesn't report usage (some MLX
+#    servers, per OpenAICompatibleClient's existing "NOT YET VERIFIED"
+#    comment) degrades to None fields, not a crash or a fabricated 0.
+# 2. LLMClient.__init__ takes an optional `usage_callback` -- if given,
+#    it's invoked as usage_callback(role, response) after every
+#    backend.chat() call, success or not attempted otherwise. This is the
+#    ONLY new integration point a caller needs: dashboard.py passes a
+#    closure that accumulates into a job dict via _set_job(), matching
+#    the same optional-callback pattern on_step already uses in
+#    writer.py/revision.py. None (the default) is a no-op for every
+#    existing caller -- CLI, tests, etc. -- zero behavior change.
+#
+# Per-backend usage sourcing, each best-effort and independently:
+# - AnthropicClient: response.usage.input_tokens / .output_tokens (the
+#   Anthropic SDK always returns this on messages.create()). No
+#   elapsed_seconds from the SDK response itself; wall-clock timed around
+#   the call instead, same technique used for the other two backends.
+# - OllamaNativeClient: native /api/chat's response body carries
+#   prompt_eval_count / eval_count (token counts) and eval_duration (
+#   nanoseconds, generation time only -- excludes prompt-eval time,
+#   which is what a "tokens/sec generation speed" stat actually wants).
+#   All three are OPTIONAL per Ollama's own docs depending on server
+#   version/model -- .get() throughout, never indexed.
+# - OpenAICompatibleClient: OpenAI-compatible /v1/chat/completions
+#   SHOULD return a top-level "usage": {"prompt_tokens":..,
+#   "completion_tokens":..} block, but per this module's own prior
+#   comment this has never been verified against a real MLX/oMLX server
+#   -- .get()'d defensively, None fields if absent rather than assuming
+#   the shape.
+#
+# elapsed_seconds is wall-clock timed around the HTTP call in every
+# backend (not trusted to any single API's self-reported duration field,
+# which not all three expose), so it's directly comparable across
+# backends for a "tokens/sec" computation regardless of provider.
+
 class LLMResponse:
     text: str
     model: str
     provider: str
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    elapsed_seconds: float | None = None
+    def total_tokens(self) -> int | None:
+        ...
+
+    def tokens_per_second(self) -> float | None:
+        """Completion-token generation speed -- the number most people"""
+        ...
+
 
 class LLMBackend(Protocol):
     """Anything that can turn a list of chat messages into a response."""
@@ -999,7 +1135,7 @@ def _resolve_env(value: Any) -> Any:
 
 class LLMClient:
     """Resolves a role name (e.g. "writer_selection") to the right"""
-    def __init__(self, roles_path: str | Path='config/roles.yaml', overrides: dict[str, str] | None=None) -> None:
+    def __init__(self, roles_path: str | Path='config/roles.yaml', overrides: dict[str, str] | None=None, usage_callback: Callable[[str, LLMResponse], None] | None=None) -> None:
         ...
 
     def roles(self) -> dict[str, dict]:

@@ -105,6 +105,56 @@ progress bar that will never move again). Delete/clear controls
 (POST /jobs/<id>/delete, POST /jobs/clear) only ever remove
 finished/cancelled/interrupted jobs -- an active job is never deletable
 out from under its own running thread.
+
+2026-08-23 addition, continued (Captain items #3 and #4): two more
+roadmap items closed this same session, per direct request.
+
+- **Unified progress-bar contract (#3).** A single new helper,
+  _job_progress_fraction(job) -> float, computes a 0..1 completion
+  fraction from whatever fields that job's kind already writes (no new
+  per-kind state). Used in exactly two places, both server-side single
+  source of truth: job_status_json() now returns a "progress_fraction"
+  key alongside the raw job dict, and the generic spinner-wrap template
+  in job_status_page() (previously text-only for generate/score_batch/
+  scout/dead_link_check -- only batch_generate had a real <progress>
+  element) now renders one <progress> bar whose value poll()'s JS sets
+  from that same field, uniformly, instead of four kind-specific bar
+  implementations. jobs_index() also renders a real bar per active job
+  card now (previously text-only there too), and the page is now split
+  into an "Active now" section (real bars, live progress) above the
+  full "History" list, functioning as the multi-job mini-dashboard
+  requested -- so someone who kicked off scout + score-batch + a
+  generate batch together can see all three progressing at once
+  without opening three tabs. Token usage / token generation speed
+  were also requested for this mini-dashboard but are NOT built yet --
+  llm.py hasn't been uploaded in this thread, so it's unknown whether
+  the LLMClient response object even carries token counts (selection.py
+  only ever reads response.text). Deferred, not forgotten -- see
+  _job_progress_fraction()'s docstring for the intended extension point.
+- **Combined Scout + dead-link-check job (#4).** New kind
+  "scout_and_check", new route (POST /scout-and-check/run), new runner
+  _run_scout_and_check_job(). Runs Scout to completion first (same
+  on_company_done/should_stop mechanism _run_scout_job() already uses),
+  then -- unless cancelled mid-scout -- immediately runs the dead-link
+  sweep over every non-stale posting, same mechanism
+  _run_dead_link_check_job() already uses. Deliberately duplicates
+  those two functions' loop bodies rather than refactoring them to share
+  code: both are already confirmed live from earlier this session, and
+  the smaller/safer change here is new code alongside them, not an edit
+  to a path that already works. The dead-link half's human-in-the-loop
+  review gate is UNCHANGED -- this combined job still only ever
+  populates the job dict's "dead"/"uncertain" lists; POST
+  /postings/mark-stale, reached via dead_links_results() (now accepting
+  kind "scout_and_check" too, not just "dead_link_check"), remains the
+  only route that actually writes status='stale'. Explicit choice, not
+  a default: a real dead-link sweep still runs at ~16% inconclusive per
+  the first live run of that feature, and auto-marking stale without a
+  person looking would risk quietly hiding postings that are still
+  live. The postings-index "Run Scout" and "Check for dead links"
+  buttons are replaced by one combined button; the two old routes
+  (/scout/run, /postings/check-dead-links) and their runners are left
+  in place, reachable directly, not deleted -- only the UI's default
+  path changed.
 """
 from __future__ import annotations
 
@@ -170,6 +220,87 @@ def _set_job(job_id: str, **fields) -> None:
         snapshot = dict(job)
     _persist_job(job_id, snapshot)
 
+def _make_usage_callback(job_id: str):
+    """Returns a closure for LLMClient(usage_callback=...) that
+    accumulates token/timing totals into job_id's dict, same
+    read-modify-write-via-_set_job() pattern _run_score_batch() already
+    uses for its scored/skipped counters. One closure per background
+    job, not global -- so concurrent jobs (confirmed live this session:
+    score_batch alongside scout_and_check) never cross-contaminate
+    totals, and a batch_generate job's per-posting LLMClient() calls all
+    correctly accumulate into the SAME batch job_id.
+
+    Fields written, all cumulative across every llm.complete() call this
+    job makes: prompt_tokens_total, completion_tokens_total,
+    llm_seconds_total, llm_calls_total. Any single call whose response
+    has None for tokens/elapsed (see llm.py's per-backend "best-effort"
+    comment -- some MLX servers report no usage) simply doesn't add to
+    the total rather than raising or reporting a fake 0; llm_calls_total
+    still increments so the mini-dashboard can show "N calls (M with
+    usage data)" instead of a silently-undercounted total.
+    """
+    def _on_usage(role: str, response) -> None:
+        job = _get_job(job_id) or {}
+        prompt_total = job.get("prompt_tokens_total", 0)
+        completion_total = job.get("completion_tokens_total", 0)
+        seconds_total = job.get("llm_seconds_total", 0.0)
+        calls_total = job.get("llm_calls_total", 0) + 1
+        calls_with_usage = job.get("llm_calls_with_usage", 0)
+
+        if response.prompt_tokens is not None:
+            prompt_total += response.prompt_tokens
+        if response.completion_tokens is not None:
+            completion_total += response.completion_tokens
+        if response.elapsed_seconds is not None:
+            seconds_total += response.elapsed_seconds
+        if response.prompt_tokens is not None or response.completion_tokens is not None:
+            calls_with_usage += 1
+
+        _set_job(
+            job_id,
+            prompt_tokens_total=prompt_total,
+            completion_tokens_total=completion_total,
+            llm_seconds_total=seconds_total,
+            llm_calls_total=calls_total,
+            llm_calls_with_usage=calls_with_usage,
+        )
+    return _on_usage
+
+
+def _log_token_usage(kind: str, job_id: str) -> None:
+    """Reads job_id's accumulated totals (written by _make_usage_callback()'s
+    closure during the run) and writes ONE run_log row for the whole job.
+    Fixes a bug in an earlier version of this function: that version
+    referenced a bare `job` variable that was never defined in the
+    calling functions' scope, which raised NameError, which the
+    surrounding try/except then silently reclassified as a job failure
+    -- even though generation/scoring had already succeeded. This
+    version fetches the job dict itself via _get_job(), the same way
+    every other read of job state in this file already does.
+
+    Best-effort, like _persist_job(): a logging failure must never turn
+    an already-successful generate/score run into a reported error.
+    """
+    job = _get_job(job_id) or {}
+    prompt_tokens = job.get("prompt_tokens_total", 0)
+    completion_tokens = job.get("completion_tokens_total", 0)
+    calls = job.get("llm_calls_total", 0)
+    total_tokens = prompt_tokens + completion_tokens
+    try:
+        conn = get_connection()
+        init_schema(conn)
+        conn.execute(
+            "INSERT INTO run_log (agent, finished_at, status, detail, tokens_used, cost_usd) "
+            "VALUES (?, datetime('now'), 'ok', ?, ?, NULL)",
+            (
+                kind,
+                f"{calls} LLM call(s), {total_tokens:,} tokens",
+                total_tokens or None,
+            ),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001 -- logging usage must never mask a real success
+        logger.exception("failed to log token usage for job %s (kind=%s)", job_id, kind)
 
 def _get_job(job_id: str) -> dict | None:
     with _jobs_lock:
@@ -238,6 +369,7 @@ def _load_jobs_from_db() -> None:
         _persist_job(job_id, job)
 
     logger.info("loaded %d persisted job(s), %d marked interrupted", len(rows), len(to_rewrite))
+
 
 
 def _delete_job(job_id: str) -> bool:
@@ -399,15 +531,18 @@ def jobs_index():
     with _jobs_lock:
         items = sorted(_jobs.items(), key=lambda kv: kv[1].get("created_at", ""), reverse=True)
 
-    any_active = any(j.get("status") in _ACTIVE_STATUSES for _jid, j in items)
-    any_finished = any(j.get("status") not in _ACTIVE_STATUSES for _jid, j in items)
+    active_items = [(jid, j) for jid, j in items if j.get("status") in _ACTIVE_STATUSES]
+    history_items = [(jid, j) for jid, j in items if j.get("status") not in _ACTIVE_STATUSES]
+    any_active = bool(active_items)
+    any_finished = bool(history_items)
+    _CANCELLABLE_KINDS = ("batch_generate", "score_batch", "dead_link_check", "scout", "generate", "scout_and_check")
 
-    def _job_link(job_id: str, job: dict) -> str:
+    def _job_link(job_id: str, job: dict, show_bar: bool) -> str:
         status = job.get("status", "unknown")
         kind = job.get("kind", "unknown")
         label, detail, href = _job_display(job_id, job)
         actions = []
-        if status in _ACTIVE_STATUSES and kind in ("batch_generate", "score_batch", "dead_link_check", "scout", "generate"):
+        if status in _ACTIVE_STATUSES and kind in _CANCELLABLE_KINDS:
             actions.append(f"""<form method="post" action="{url_for('cancel_job_route', job_id=job_id)}"
   class="inline-form" style="display:inline-block;"
   onsubmit="return confirm('Cancel this job? It stops after the current item finishes, not instantly.');">
@@ -421,14 +556,42 @@ def jobs_index():
   <button class="btn btn--secondary btn--small" type="submit">Delete</button>
 </form>""")
         actions_html = f'<div style="margin-top:8px;">{"".join(actions)}</div>' if actions else ""
+        # Real <progress> bar for active jobs -- Captain roadmap item #3
+        # ("unified progress-bar contract every job type implements
+        # once"), same _job_progress_fraction() helper job_status_json()
+        # uses, not a second implementation. Server-rendered against the
+        # snapshot at page-load time; this page's own 4s full-reload (see
+        # refresh_script below) is what keeps it current, matching this
+        # file's stated preference for the simpler mechanism over
+        # per-card JS polling for something this size.
+        bar_html = ""
+        if show_bar:
+            frac = _job_progress_fraction(job)
+            pct = round(frac * 100)
+            bar_html = f"""<progress value="{frac:.4f}" max="1" style="width:100%;height:8px;margin-top:6px;"></progress>
+  <div class="card__meta" style="margin-top:2px;">{pct}%</div>"""
         return f"""<div class="card">
   <div class="card__company">{_esc(kind)} &middot; {_esc(status)}</div>
   <h3 class="card__title"><a href="{href}">{_esc(label)}</a></h3>
   <div class="card__meta">{_esc(detail)}</div>
+  {bar_html}
   {actions_html}
 </div>"""
 
-    cards = "".join(_job_link(jid, j) for jid, j in items) or '<div class="empty-state">No jobs in history yet.</div>'
+    active_cards = "".join(_job_link(jid, j, show_bar=True) for jid, j in active_items)
+    history_cards = "".join(_job_link(jid, j, show_bar=False) for jid, j in history_items) or \
+        '<div class="empty-state">No finished jobs yet.</div>'
+
+    active_section = ""
+    if any_active:
+        # This section IS the multi-job mini-dashboard -- if you kick off
+        # Scout, a score-batch, and a generate batch together, all three
+        # show up here at once with real progress, not just as three
+        # entries indistinguishable from finished history below.
+        active_section = f"""<div class="detail-header" style="margin-top:0;"><h2 style="margin:0;">Active now</h2></div>
+  <div class="grid">{active_cards}</div>
+  <hr style="margin:24px 0;border:none;border-top:1px solid var(--hairline);">"""
+
     refresh_script = (
         '<script>setTimeout(function(){ window.location.reload(); }, 4000);</script>' if any_active else ""
     )
@@ -441,8 +604,10 @@ def jobs_index():
     body = f"""<div class="dash-wrap">
   <div class="detail-header"><h1>Recent jobs</h1></div>
   <p class="sub">Job history -- survives a dashboard restart. A job still running when the process last stopped shows as "interrupted".</p>
+  {active_section}
+  <div class="detail-header" style="margin-top:0;"><h2 style="margin:0;">History</h2></div>
   {clear_all_form}
-  <div class="grid">{cards}</div>
+  <div class="grid">{history_cards}</div>
   <p class="sub" style="margin-top:16px;"><a class="btn btn--secondary btn--small" href="{url_for('index')}">Back to postings</a></p>
 </div>{refresh_script}"""
     return _page("Recent jobs", body)
@@ -466,6 +631,103 @@ def clear_jobs_route():
     _clear_jobs()
     return redirect(url_for("jobs_index"))
 
+
+def _job_progress_fraction(job: dict) -> float:
+    """Single source of truth for "how far along is this job, 0..1" --
+    the Captain roadmap's #3 item ("unified progress-bar contract every
+    job type implements once"). Every branch below reads ONLY fields
+    that kind's runner already writes for _job_display() -- no new
+    per-kind state introduced for this. Used by job_status_json() (adds
+    a "progress_fraction" key the generic spinner-wrap page's poll()
+    reads) and jobs_index() (renders a real <progress> bar per active
+    job card, not just text).
+
+    Extension point for the token-usage/token-speed mini-dashboard
+    request: once llm.py is available and LLMClient's response carries
+    token counts, a parallel _job_token_stats(job) helper can read
+    whatever field on_step()/on_company_done() are extended to also
+    write (e.g. running tokens_generated / elapsed_seconds), following
+    the same "read what the runner already writes, don't add a second
+    tracking mechanism" pattern this function follows. Not built yet --
+    deliberately deferred until llm.py is seen.
+
+    Terminal statuses (done/error/cancelled/interrupted) still return a
+    real number rather than 0 or None -- "done" is exactly 1.0, and a
+    cancelled/interrupted job returns however far it actually got,
+    which is meaningful on the jobs_index() history list (a job
+    cancelled 80% through reads differently than one cancelled at the
+    first item)."""
+    kind = job.get("kind", "unknown")
+    status = job.get("status", "unknown")
+
+    if status == "done":
+        return 1.0
+    if status == "queued":
+        return 0.0
+
+    def _ratio(done: float, total: float) -> float:
+        if not total:
+            return 0.0
+        return max(0.0, min(1.0, done / total))
+
+    if kind == "generate":
+        return _ratio(job.get("step") or 0, job.get("total_steps") or 0)
+
+    if kind == "batch_generate":
+        total = job.get("total") or 0
+        if not total:
+            return 0.0
+        batch_index = job.get("batch_index") or 0
+        step = job.get("step") or 0
+        total_steps = job.get("total_steps") or 0
+        inner = _ratio(step, total_steps)
+        # batch_index counts the posting CURRENTLY in flight as "started,
+        # not yet done" -- so completed-whole-postings is batch_index-1,
+        # plus inner progress on the one in flight.
+        completed_whole = max(0, batch_index - 1)
+        return _ratio(completed_whole + inner, total)
+
+    if kind == "score_batch":
+        total = job.get("total") or 0
+        done = (job.get("scored") or 0) + (job.get("skipped") or 0)
+        return _ratio(done, total)
+
+    if kind == "scout":
+        return _ratio(job.get("companies_done") or 0, job.get("total_companies") or 0)
+
+    if kind == "dead_link_check":
+        return _ratio(job.get("checked") or 0, job.get("total") or 0)
+
+    if kind == "scout_and_check":
+        # Two sequential phases, each treated as half the bar -- an
+        # approximation (scouting N companies and checking M posting
+        # URLs aren't equal-cost units of work), but simple, honest
+        # about being a 50/50 split, and matches this file's stated
+        # preference for the smaller/simpler mechanism over a cleverer
+        # weighted one for something this size.
+        phase = job.get("phase", "scout")
+        if phase == "scout":
+            inner = _ratio(job.get("companies_done") or 0, job.get("total_companies") or 0)
+            return inner * 0.5
+        inner = _ratio(job.get("checked") or 0, job.get("total") or 0)
+        return 0.5 + inner * 0.5
+
+    return 0.0
+
+def _format_token_suffix(job: dict) -> str:
+    """Shared by every LLM-calling kind's detail line. Empty string
+    (not None) when there's nothing to show yet, so callers can just
+    `detail += _format_token_suffix(job)` unconditionally."""
+    calls = job.get("llm_calls_total", 0)
+    if not calls:
+        return ""
+    prompt = job.get("prompt_tokens_total", 0)
+    completion = job.get("completion_tokens_total", 0)
+    seconds = job.get("llm_seconds_total", 0.0)
+    tok_s = f"{completion / seconds:.0f} tok/s" if seconds > 0 and completion else "speed n/a"
+    with_usage = job.get("llm_calls_with_usage", 0)
+    coverage = "" if with_usage == calls else f", {with_usage}/{calls} calls reported usage"
+    return f" · {prompt + completion:,} tokens ({tok_s}{coverage})"
 
 def _job_display(job_id: str, job: dict) -> tuple[str, str, str]:
     """Single source of truth for how a job shows up in BOTH jobs_index()
@@ -497,6 +759,7 @@ def _job_display(job_id: str, job: dict) -> tuple[str, str, str]:
             step = job.get("step") or 0
             detail = f"{job.get('current') or 'starting…'}" + (f" (step {step}/{total_steps})" if total_steps else "")
             href = url_for("job_status_page", job_id=job_id)
+        detail += _format_token_suffix(job)
         return label, detail, href
 
     if kind == "batch_generate":
@@ -525,6 +788,7 @@ def _job_display(job_id: str, job: dict) -> tuple[str, str, str]:
                 detail += f" \u2014 {cur} \u2014 {title}"
             if total_steps:
                 detail += f" (step {step}/{total_steps})"
+        detail += _format_token_suffix(job)
         return label, detail, url_for("job_status_page", job_id=job_id)
 
     if kind == "score_batch":
@@ -539,6 +803,7 @@ def _job_display(job_id: str, job: dict) -> tuple[str, str, str]:
             detail = f"Failed: {job.get('error', '')}"
         elif status in ("queued", "running") and job.get("current"):
             detail += f" \u2014 currently: {job['current']}"
+        detail += _format_token_suffix(job)
         return label, detail, url_for("job_status_page", job_id=job_id)
 
     if kind == "scout":
@@ -586,6 +851,49 @@ def _job_display(job_id: str, job: dict) -> tuple[str, str, str]:
                 detail += f" \u2014 currently: {job['current']}"
         return label, detail, url_for("job_status_page", job_id=job_id)
 
+    if kind == "scout_and_check":
+        label = "Scout + dead-link check"
+        phase = job.get("phase", "scout")
+        if status == "done":
+            detail = (f"{job.get('companies_checked', 0)} companies checked, {job.get('new_postings', 0)} new "
+                      f"\u2014 {len(job.get('dead', []))} dead link(s), {len(job.get('uncertain', []))} inconclusive")
+            if job.get("error_count"):
+                detail += f", {job['error_count']} scout error(s)"
+            return label, detail, url_for("dead_links_results", job_id=job_id)
+        if status == "cancelled":
+            if phase == "scout":
+                detail = (f"Cancelled during scouting, after {job.get('companies_done', 0)} of "
+                          f"{job.get('total_companies', 0)} companies \u2014 dead-link check not started")
+            else:
+                detail = (f"Scout finished ({job.get('companies_checked', 0)} companies, "
+                          f"{job.get('new_postings', 0)} new); cancelled during dead-link check after "
+                          f"{job.get('checked', 0)} of {job.get('total', 0)} checked \u2014 "
+                          f"{len(job.get('dead', []))} dead, {len(job.get('uncertain', []))} inconclusive so far")
+            return label, detail, url_for("dead_links_results", job_id=job_id)
+        if status == "interrupted":
+            if phase == "scout":
+                detail = (f"Interrupted by a dashboard restart during scouting, after "
+                          f"{job.get('companies_done', 0)} of {job.get('total_companies', 0)} companies \u2014 "
+                          f"dead-link check not started")
+            else:
+                detail = (f"Interrupted by a dashboard restart during dead-link check, after "
+                          f"{job.get('checked', 0)} of {job.get('total', 0)} checked \u2014 "
+                          f"{len(job.get('dead', []))} dead, {len(job.get('uncertain', []))} inconclusive so far")
+            return label, detail, url_for("dead_links_results", job_id=job_id)
+        if status == "error":
+            detail = f"Failed during {'scouting' if phase == 'scout' else 'dead-link check'}: {job.get('error', '')}"
+        elif phase == "scout":
+            total_companies = job.get("total_companies") or 0
+            done = job.get("companies_done") or 0
+            detail = f"Scouting: {done} of {total_companies} companies checked" if total_companies else "Scouting: checking company career pages\u2026"
+            if job.get("current_company"):
+                detail += f" \u2014 last: {job['current_company']}"
+        else:
+            detail = f"Checking links: {job.get('checked', 0)} of {job.get('total', 0)} checked"
+            if job.get("current"):
+                detail += f" \u2014 currently: {job['current']}"
+        return label, detail, url_for("job_status_page", job_id=job_id)
+
     return kind, status, url_for("job_status_page", job_id=job_id)
 
 
@@ -628,7 +936,8 @@ def _run_generation(
         step=0, total_steps=total_steps, current="starting…",
     )
     try:
-        client = LLMClient()
+        # _run_generation (job_id is already that function's own param):
+        client = LLMClient(usage_callback=_make_usage_callback(job_id))
         result = run_revision_loop(
             client,
             company_name=company_name,
@@ -643,6 +952,7 @@ def _run_generation(
         init_schema(conn)
         draft_id = drafts_db.save_draft(conn, posting_id, result)
         _set_job(job_id, status="done", draft_id=draft_id)
+        _log_token_usage("generate", job_id)
     except _JobCancelled:
         logger.info("generation for posting %s cancelled by user (job %s)", posting_id, job_id)
         _set_job(job_id, status="cancelled")
@@ -728,7 +1038,10 @@ def _run_batch_generation(
             step=0, total_steps=total_steps, current="starting…",
         )
         try:
-            client = LLMClient()
+            # _run_batch_generation -- INSIDE the per-posting loop, same job_id
+            # (the whole batch shares one job_id, so this correctly accumulates
+            # across every posting in the batch, not just the last one):
+            client = LLMClient(usage_callback=_make_usage_callback(job_id))
             result = run_revision_loop(
                 client,
                 company_name=company_name,
@@ -761,6 +1074,7 @@ def _run_batch_generation(
         job_id, status=("cancelled" if was_cancelled else "done"),
         results=results, succeeded=succeeded, failed=failed,
     )
+    _log_token_usage("batch_generate", job_id)
 
 
 def _run_score_batch(
@@ -796,7 +1110,8 @@ def _run_score_batch(
     _set_job(job_id, status="running", kind="score_batch", total=total, scored=0, skipped=0, current="")
     try:
         criteria = load_search_criteria()
-        client = LLMClient()
+        # _run_score_batch:
+        client = LLMClient(usage_callback=_make_usage_callback(job_id))
         conn = get_connection()
         init_schema(conn)
 
@@ -826,6 +1141,7 @@ def _run_score_batch(
 
         was_cancelled = (_get_job(job_id) or {}).get("cancel_requested", False)
         _set_job(job_id, status=("cancelled" if was_cancelled else "done"), scored=scored, skipped=skipped, total=total)
+        _log_token_usage("score_batch", job_id)
     except Exception as exc:  # noqa: BLE001
         logger.exception("score batch job %s failed", job_id)
         _set_job(job_id, status="error", error=str(exc))
@@ -941,6 +1257,115 @@ def _run_dead_link_check_job(job_id: str, posting_rows: list[tuple]) -> None:
         _set_job(job_id, status=("cancelled" if was_cancelled else "done"), checked=final_checked, dead=dead, uncertain=uncertain)
     except Exception as exc:  # noqa: BLE001
         logger.exception("dead link check job %s failed", job_id)
+        _set_job(job_id, status="error", error=str(exc))
+
+
+def _run_scout_and_check_job(job_id: str) -> None:
+    """Runs in a background thread, started by POST /scout-and-check/run.
+    Captain roadmap item #4 ("combine Run Scout and check-for-dead-links
+    into one job"), built per direct request: there's no point trying to
+    apply to postings that are no longer there, so a single run now does
+    both -- Scout first (find new postings, mark stale anything a
+    successfully-scraped company page no longer lists), then a full
+    dead-link sweep (catch postings whose company page still 200s but
+    the individual posting URL is now 404/410/gone).
+
+    Deliberately duplicates _run_scout_job()'s and
+    _run_dead_link_check_job()'s loop bodies rather than refactoring them
+    to share code -- both are already confirmed live from earlier this
+    session; this is new code running alongside them, not an edit to a
+    path that already works.
+
+    The dead-link half's human review gate is UNCHANGED: this job only
+    ever populates job["dead"]/job["uncertain"], same as
+    _run_dead_link_check_job(). Nothing here calls mark_stale_route()'s
+    UPDATE directly -- see that route's docstring for why a detected dead
+    link is a candidate, not a write, until a person reviews and submits
+    dead_links_results()'s form. Explicit choice, kept from the standalone
+    dead-link-check feature: the first real sweep came back 16%
+    inconclusive, and auto-marking stale without a look would risk
+    quietly hiding postings that are still live.
+
+    job["phase"] is "scout" during the first half, "dead_link_check"
+    during the second -- read by _job_display()/_job_progress_fraction()
+    to know which set of fields (companies_done/total_companies vs.
+    checked/total) currently means something. Cancel is checked at both
+    phase boundaries (once per company; once per posting URL), same
+    cancel_requested field every other job kind uses.
+    """
+    _set_job(job_id, status="running", kind="scout_and_check", phase="scout",
+              companies_done=0, total_companies=len(load_companies()), current_company="")
+
+    def _on_company_done(result) -> None:
+        job = _get_job(job_id) or {}
+        _set_job(
+            job_id,
+            companies_done=job.get("companies_done", 0) + 1,
+            current_company=result.company_name,
+        )
+
+    def _should_stop() -> bool:
+        return (_get_job(job_id) or {}).get("cancel_requested", False)
+
+    try:
+        # --- Phase 1: Scout ---------------------------------------------
+        results = run_scout(on_company_done=_on_company_done, should_stop=_should_stop)
+        total_new = sum(r.new_postings for r in results)
+        errors = [r for r in results if r.strategy == "error"]
+
+        conn = get_connection()
+        init_schema(conn)
+        log_status = "ok" if not errors else "partial"
+        detail = json.dumps({
+            "companies_checked": len(results),
+            "new_postings": total_new,
+            "errors": [{"company": r.company_name, "error": r.error} for r in errors],
+        })
+        _log_run(conn, log_status, detail)
+
+        _set_job(
+            job_id,
+            companies_checked=len(results), new_postings=total_new, error_count=len(errors),
+        )
+
+        scout_cancelled = (_get_job(job_id) or {}).get("cancel_requested", False)
+        if scout_cancelled:
+            _set_job(job_id, status="cancelled")
+            return
+
+        # --- Phase 2: dead-link check, over every non-stale posting ------
+        # (freshly re-queried -- Phase 1 may have just inserted new rows
+        # and marked others stale, so this must NOT reuse a pre-scout
+        # snapshot of the postings table.)
+        rows = conn.execute(
+            """SELECT postings.id, companies.name, postings.title, postings.url
+               FROM postings JOIN companies ON postings.company_id = companies.id
+               WHERE postings.status != 'stale'
+               ORDER BY companies.name, postings.title"""
+        ).fetchall()
+        total = len(rows)
+        _set_job(job_id, phase="dead_link_check", total=total, checked=0, dead=[], uncertain=[], current="")
+
+        limiter = RateLimiter()
+        dead: list[dict] = []
+        uncertain: list[dict] = []
+        for i, (posting_id, company, title, url) in enumerate(rows, start=1):
+            if (_get_job(job_id) or {}).get("cancel_requested"):
+                break
+            _set_job(job_id, current=f"{company} \u2014 {title}")
+            is_alive, link_detail = check_url_alive(url, limiter)
+            entry = {"id": posting_id, "company": company, "title": title, "url": url, "detail": link_detail}
+            if is_alive is False:
+                dead.append(entry)
+            elif is_alive is None:
+                uncertain.append(entry)
+            _set_job(job_id, checked=i, dead=dead, uncertain=uncertain)
+
+        was_cancelled = (_get_job(job_id) or {}).get("cancel_requested", False)
+        final_checked = (_get_job(job_id) or {}).get("checked", 0)
+        _set_job(job_id, status=("cancelled" if was_cancelled else "done"), checked=final_checked, dead=dead, uncertain=uncertain)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("scout_and_check job %s failed", job_id)
         _set_job(job_id, status="error", error=str(exc))
 
 
@@ -1079,6 +1504,7 @@ def _page(title: str, body: str) -> str:
   <span id="job-indicator" style="float:right;font-size:13px;color:var(--ink-faint);"></span>
   <a id="notif-enable" href="#" style="float:right;font-weight:500;font-size:13px;margin-right:14px;display:none;">Enable notifications</a>
   <a href="{url_for('settings_page')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Settings</a>
+  <a href="{url_for('tokens_dashboard')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Token usage</a>
 </div></div>
 {body}
 <script>
@@ -1392,20 +1818,25 @@ def index():
     page_rows = filtered_rows[(page - 1) * per_page : page * per_page]
 
     add_manual_link = f'<a class="btn btn--secondary btn--small" href="{url_for("posting_manual_form")}">+ Add posting manually</a>'
-    run_scout_form = f"""<form method="post" action="{url_for('run_scout_route')}" class="inline-form">
-      <button class="btn btn--small" type="submit">Run Scout</button></form>"""
-    dead_link_form = f"""<form method="post" action="{url_for('check_dead_links_route')}" class="inline-form">
-      <button class="btn btn--small btn--secondary" type="submit"
-        title="Checks every non-stale posting's stored URL for a real HTTP 404/410 -- can take a while across hundreds of postings.">
-        Check for dead links</button></form>"""
+    # Combined Scout + dead-link-check button (Captain roadmap #4, direct
+    # request): the two used to be separate buttons/routes. Kept as one
+    # action now -- no point applying to a posting Scout would've just
+    # found is gone. The two old routes (run_scout_route/
+    # check_dead_links_route) and their standalone runners are still in
+    # the file and still work if you navigate to them directly; only the
+    # index page's default path changed.
+    scout_and_check_form = f"""<form method="post" action="{url_for('scout_and_check_route')}" class="inline-form">
+      <button class="btn btn--small" type="submit"
+        title="Runs Scout (find new postings, mark stale anything gone from a company's page), then checks every remaining posting's URL for a real HTTP 404/410 -- can take a while.">
+        Run Scout + check links</button></form>"""
     recent_jobs_link = f'<a class="btn btn--small btn--secondary" href="{url_for("jobs_index")}">Recent jobs</a>'
     score_batch_form = _score_batch_form_html(filters, total)
 
     if not all_rows:
         body = f"""<div class="dash-wrap">
-  <div class="detail-header"><h1>Postings</h1>{run_scout_form}{dead_link_form}{recent_jobs_link}</div>
+  <div class="detail-header"><h1>Postings</h1>{scout_and_check_form}{recent_jobs_link}</div>
   {filter_bar}
-  <div class="empty-state">No postings yet — click Run Scout above, or {add_manual_link}.</div>
+  <div class="empty-state">No postings yet — click Run Scout + check links above, or {add_manual_link}.</div>
 </div>"""
         return _page("Postings", body)
 
@@ -1442,7 +1873,7 @@ def index():
         pagination_html = f'<div class="pagination">{"".join(links)}</div>'
 
     body = f"""<div class="dash-wrap">
-  <div class="detail-header"><h1>Postings</h1>{run_scout_form}{dead_link_form}{recent_jobs_link}
+  <div class="detail-header"><h1>Postings</h1>{scout_and_check_form}{recent_jobs_link}
     <p class="sub">{total} posting(s) match &middot; {len(all_rows)} total (excluding stale) &middot; {add_manual_link}</p></div>
   {filter_bar}
   {score_batch_form}
@@ -1790,12 +2221,21 @@ def cancel_job_route(job_id):
     Single-posting 'generate' support added same day via a different
     mechanism (see _JobCancelled's docstring): no Python-level loop to
     check between iterations here, so cancellation is raised from inside
-    the on_step callback instead. NOT CONFIRMED LIVE that run_revision_loop()
-    actually lets that exception through rather than swallowing it
-    internally (revision.py wasn't uploaded this session) -- test this
-    one specifically before trusting it."""
+    the on_step callback instead. Code-level trace now COMPLETE (writer.py
+    and selection.py both seen): every on_step call in the chain is bare,
+    no try/except anywhere between _step() and run_revision_loop(), so
+    _JobCancelled propagates cleanly regardless of which of the 10 units
+    of work per round is running when Cancel is clicked. Still worth one
+    real click-test to confirm live (see handoff), but there's no
+    remaining code-level uncertainty.
+
+    'scout_and_check' support added same session as the combined-job
+    feature -- cancel_requested is checked at both phase boundaries
+    (between companies during the scout phase, between posting URLs
+    during the dead-link phase), same field, same mechanism, no new
+    cancellation logic needed."""
     job = _get_job(job_id)
-    if job is not None and job.get("kind") in ("batch_generate", "score_batch", "dead_link_check", "scout", "generate"):
+    if job is not None and job.get("kind") in ("batch_generate", "score_batch", "dead_link_check", "scout", "generate", "scout_and_check"):
         _set_job(job_id, cancel_requested=True)
     redirect_to = request.form.get("redirect_to") or url_for("jobs_index")
     return redirect(redirect_to)
@@ -1811,6 +2251,22 @@ def run_scout_route():
     job_id = uuid.uuid4().hex[:12]
     _set_job(job_id, status="queued", kind="scout")
     thread = threading.Thread(target=_run_scout_job, args=(job_id,), daemon=True)
+    thread.start()
+    return redirect(url_for("job_status_page", job_id=job_id))
+
+
+@app.route("/scout-and-check/run", methods=["POST"])
+def scout_and_check_route():
+    """Combined Scout + dead-link-check, Captain roadmap item #4. Same
+    job-thread mechanism as every other job kind; run_scout() itself
+    takes no arguments, same as run_scout_route(), so there's no form
+    data to read here either -- the dead-link sweep's posting set is
+    computed fresh inside _run_scout_and_check_job() AFTER Scout finishes,
+    not passed in from here, since Scout may have just changed which
+    postings are non-stale."""
+    job_id = uuid.uuid4().hex[:12]
+    _set_job(job_id, status="queued", kind="scout_and_check", phase="scout")
+    thread = threading.Thread(target=_run_scout_and_check_job, args=(job_id,), daemon=True)
     thread.start()
     return redirect(url_for("job_status_page", job_id=job_id))
 
@@ -1881,9 +2337,13 @@ def dead_links_results(job_id):
         real run isn't an invisible number with no detail behind it,
         NOT because these are safe to bulk-mark-stale; see
         check_url_alive()'s docstring for why that distinction matters.
+
+    Also serves kind == "scout_and_check" jobs (the combined Scout +
+    dead-link-check job) -- same job-dict fields (dead/uncertain/checked/
+    total), so this page needed no other changes to support it.
     """
     job = _get_job(job_id)
-    if job is None or job.get("kind") != "dead_link_check":
+    if job is None or job.get("kind") not in ("dead_link_check", "scout_and_check"):
         abort(404)
     if job.get("status") not in ("done", "cancelled", "interrupted"):
         return redirect(url_for("job_status_page", job_id=job_id))
@@ -2178,13 +2638,14 @@ pollBatch();
   <div class="spinner"></div>
   <p id="status">Starting…</p>
   <p id="detail" style="font-size:13px;color:var(--ink-faint);"></p>
+  <progress id="generic-progress" value="0" max="1" style="width:100%;height:8px;margin-top:10px;display:none;"></progress>
   <p id="done-link"></p>
   <div id="cancel-wrap">{
     f'''<form method="post" action="{url_for("cancel_job_route", job_id=job_id)}" id="generic-cancel-form"
   style="margin-top:12px;" onsubmit="return confirm('Cancel this job? It stops after the current item finishes, not instantly.');">
   <input type="hidden" name="redirect_to" value="{url_for("job_status_page", job_id=job_id)}">
   <button class="btn btn--secondary btn--small" type="submit" style="color:#b00020;border-color:#b00020;">Cancel</button></form>'''
-    if job.get("kind") in ("batch_generate", "score_batch", "dead_link_check", "scout", "generate")
+    if job.get("kind") in ("batch_generate", "score_batch", "dead_link_check", "scout", "generate", "scout_and_check")
     and job.get("status") in ("queued", "running") else ""
   }</div>
 </div></div>
@@ -2196,9 +2657,20 @@ async function poll() {{
   const detailEl = document.getElementById("detail");
   const linkEl = document.getElementById("done-link");
   const cancelForm = document.getElementById("generic-cancel-form");
+  const bar = document.getElementById("generic-progress");
+
+  // Unified progress-bar contract (Captain roadmap #3): ONE line here
+  // sets the bar for every job kind, reading the same progress_fraction
+  // field job_status_json() computes server-side via
+  // _job_progress_fraction() -- no per-kind bar logic duplicated in JS.
+  if (bar && j.status !== "done" && typeof j.progress_fraction === "number") {{
+    bar.style.display = "";
+    bar.value = j.progress_fraction;
+  }}
 
   if (j.status === "done" || j.status === "cancelled" || j.status === "interrupted") {{
     if (cancelForm) cancelForm.style.display = "none";
+    if (bar) bar.style.display = "none";
     let cancelledPrefix = "";
     if (j.status === "cancelled") cancelledPrefix = "Cancelled. ";
     if (j.status === "interrupted") cancelledPrefix = "Interrupted by a dashboard restart. ";
@@ -2206,7 +2678,7 @@ async function poll() {{
       window.location = "/postings/" + j.posting_id;
       return;
     }}
-    if (j.kind === "dead_link_check") {{
+    if (j.kind === "dead_link_check" || j.kind === "scout_and_check") {{
       window.location = "{url_for('dead_links_results', job_id=job_id)}";
       return;
     }}
@@ -2230,6 +2702,7 @@ async function poll() {{
     return;
   }} else if (j.status === "error") {{
     if (cancelForm) cancelForm.style.display = "none";
+    if (bar) bar.style.display = "none";
     el.textContent = "Failed: " + j.error;
     return;
   }} else if (j.kind === "score_batch") {{
@@ -2250,6 +2723,21 @@ async function poll() {{
       (j.dead && j.dead.length ? `, ${{j.dead.length}} dead link(s) found so far` : "") +
       (j.current ? ` \\u2014 currently: ${{j.current}}` : "");
     setTimeout(poll, 2000);
+  }} else if (j.kind === "scout_and_check") {{
+    if (j.phase === "dead_link_check") {{
+      el.textContent = j.status === "running" ? "Checking posting links\\u2026" : "Queued\\u2026";
+      detailEl.textContent = `Scout done: ${{j.companies_checked || 0}} companies, ${{j.new_postings || 0}} new. ` +
+        `Checking links: ${{j.checked || 0}} of ${{j.total}} checked` +
+        (j.dead && j.dead.length ? `, ${{j.dead.length}} dead link(s) found so far` : "") +
+        (j.current ? ` \\u2014 currently: ${{j.current}}` : "");
+    }} else {{
+      el.textContent = j.status === "running" ? "Running Scout\\u2026" : "Queued\\u2026";
+      detailEl.textContent = j.total_companies
+        ? `Scouting: ${{j.companies_done || 0}} of ${{j.total_companies}} companies checked` +
+          (j.current_company ? ` \\u2014 last: ${{j.current_company}}` : "")
+        : "Checking company career pages\\u2026";
+    }}
+    setTimeout(poll, 2500);
   }} else {{
     el.textContent = j.status === "running" ? "Running Writer \\u2192 Critic \\u2192 Revision\\u2026 (a few minutes on local models)" : "Queued\\u2026";
     detailEl.textContent = j.total_steps
@@ -2268,7 +2756,13 @@ def job_status_json(job_id):
     job = _get_job(job_id)
     if job is None:
         abort(404)
-    return job
+    # progress_fraction is computed fresh on every read, not stored --
+    # same "single source of truth" reasoning as _job_display(): the
+    # underlying fields (step/total_steps, checked/total, etc.) are the
+    # real state, this is just a derived view of it. See
+    # _job_progress_fraction()'s docstring for the unified-progress-bar
+    # contract this is part of.
+    return {**job, "progress_fraction": _job_progress_fraction(job)}
 
 
 @app.route("/postings/<int:posting_id>/report")
@@ -2594,6 +3088,50 @@ def settings_save():
     contact_line = (request.form.get("contact_line") or "").strip()
     settings_db.save_candidate_settings(conn, candidate_name, contact_line)
     return redirect(url_for("settings_page"))
+
+
+@app.route("/tokens")
+def tokens_dashboard():
+    """Aggregates run_log's tokens_used column -- now populated by every
+    LLM-calling job kind via _log_token_usage(), one row per finished
+    generate/batch_generate/score_batch job -- into a simple by-kind
+    total. Read-only, no new tables: run_log already existed for
+    exactly this purpose per ADR-0002's 'lightweight budget logging'
+    item, it just had no writer for these job kinds until now.
+
+    Fixed from an earlier broken version: that version called
+    `_page_shell(...)`, a function that doesn't exist anywhere in this
+    file (it 500'd on every visit). The real page-wrapper, used by
+    every other route in this file (see settings_page() above), is
+    `_page(title, body)`.
+    """
+    conn = get_connection()
+    init_schema(conn)
+    rows = conn.execute(
+        "SELECT agent, COUNT(*), COALESCE(SUM(tokens_used), 0) "
+        "FROM run_log WHERE tokens_used IS NOT NULL GROUP BY agent ORDER BY agent"
+    ).fetchall()
+    total_tokens = sum(r[2] for r in rows)
+    if not rows:
+        table_html = "<p class=\"sub\">No token usage logged yet -- run a generate, batch generate, or score batch job first.</p>"
+    else:
+        row_html = "".join(
+            f"<tr><td>{html.escape(agent)}</td><td>{runs}</td><td>{tokens:,}</td></tr>"
+            for agent, runs, tokens in rows
+        )
+        table_html = f"""<table>
+  <tr><th>Job kind</th><th>Runs logged</th><th>Total tokens</th></tr>
+  {row_html}
+  <tr><td><b>Total</b></td><td></td><td><b>{total_tokens:,}</b></td></tr>
+</table>"""
+    body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Token usage</h1>
+    <p class="sub">Cumulative tokens per job kind, from run_log. Cost isn't shown --
+    there's no per-model $/token table in this codebase yet, so cost_usd stays
+    unset rather than guessed.</p></div>
+  {table_html}
+</div>"""
+    return _page("Token usage", body)
 
 
 def main() -> None:
