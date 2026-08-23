@@ -19,6 +19,7 @@
 │   ├── companies.yaml
 │   ├── companies_input.yaml
 │   ├── discover_test_input.yaml
+│   ├── model_pricing.yaml
 │   ├── new_companies_batch.yaml
 │   ├── roles.yaml
 │   ├── search_criteria.example.yaml
@@ -65,7 +66,8 @@
 │   │   ├── 2026-08-17_2_BioHunter-ExtensionExtractionFixed-DeleteRouteBuilt-ScoutComplete-Handoff.md
 │   │   ├── 2026-08-23_1_BioHunter-CaptainBatchGeneratePersistedJobs-Handoff.md
 │   │   ├── 2026-08-23_2_BioHunter-TokenUsageDashboard-Handoff.md
-│   │   └── 2026-08-23_3_BioHunter-TokenDashboard-ModelAttribution-Handoff.md
+│   │   ├── 2026-08-23_3_BioHunter-TokenDashboard-ModelAttribution-Handoff.md
+│   │   └── 2026-08-24_1_BioHunter-CostCalculatorComplete-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md

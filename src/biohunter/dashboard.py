@@ -168,6 +168,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+import yaml
 from flask import Flask, Response, abort, jsonify, redirect, request, url_for
 
 from . import drafts_db, settings_db
@@ -1550,6 +1551,29 @@ td.num, th.num { text-align: right; font-family: var(--mono); }
 .token-summary .stat { display: flex; flex-direction: column; gap: 2px; }
 .token-summary .stat .n { font-family: var(--mono); font-size: 20px; font-weight: 650; }
 .token-summary .stat .label { font-size: 12px; color: var(--ink-faint); }
+.calc-inputs { display: flex; gap: 20px; flex-wrap: wrap; margin: 12px 0 18px; }
+.calc-inputs label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px;
+  color: var(--ink-faint); font-weight: 500; }
+.calc-inputs input[type="number"] { font-family: var(--mono); font-size: 14px; padding: 6px 8px;
+  border: 1px solid var(--hairline); border-radius: 4px; width: 160px; }
+.calc-output-size { margin-bottom: 14px; }
+.calc-presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.calc-preset { font-size: 12.5px; padding: 5px 10px; border: 1px solid var(--hairline);
+  border-radius: 999px; background: var(--panel); cursor: pointer; }
+.calc-preset:hover { border-color: var(--accent); }
+.calc-output-size input[type="range"] { width: 100%; max-width: 480px; display: block; margin: 6px 0; }
+.calc-output-readout { font-size: 13px; color: var(--ink-faint); }
+.calc-sort-toggle { display: flex; gap: 8px; margin: 4px 0 12px; }
+.calc-sort-btn { font-size: 12.5px; padding: 5px 12px; border: 1px solid var(--hairline);
+  border-radius: 4px; background: var(--panel); cursor: pointer; }
+.calc-sort-btn--active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.calc-row { cursor: pointer; }
+.calc-row:hover { background: var(--panel); }
+.calc-row--active { background: var(--accent-faint, #eef); font-weight: 600; }
+.calc-provider { color: var(--ink-faint); font-weight: 400; font-size: 12px; }
+.run-tok-link { color: inherit; text-decoration: underline dotted; cursor: pointer; }
+.run-tok-link:hover { color: var(--accent); }
+td.dyn-cost, th.dyn-cost { border-left: 2px solid var(--accent); }
 .result-links { font-size: 13px; }
 .result-links a { color: var(--accent); text-decoration: none; }
 .result-links a:hover { text-decoration: underline; }
@@ -3270,6 +3294,244 @@ def _token_run_results_html(kind: str, job_data: dict | None) -> str:
     return faint
 
 
+_MODEL_PRICING_PATH = "config/model_pricing.yaml"
+
+
+def _load_model_pricing() -> dict:
+    """Loads config/model_pricing.yaml for the /tokens cost calculator.
+    Same relative-path convention llm.py's LLMClient uses for
+    config/roles.yaml -- assumes the process is launched from the repo
+    root, not resolved to an absolute path.
+
+    Returns {} (not an exception) if the file is missing or malformed,
+    so a dashboard restart never breaks over a config file the user
+    hasn't created/edited yet -- the calculator section just renders
+    with a "no pricing config found" note instead of 500ing the whole
+    /tokens page. Loaded fresh on every request (not cached at module
+    level) -- same posture as LLMClient's own roles.yaml loading, so
+    editing this file and refreshing the page picks up changes without
+    a process restart, unlike a .py edit.
+    """
+    try:
+        with open(_MODEL_PRICING_PATH) as f:
+            data = yaml.safe_load(f) or {}
+        return data.get("models", {}), data.get("last_updated")
+    except (OSError, yaml.YAMLError):
+        logger.exception("failed to load %s -- /tokens calculator will show no pricing data", _MODEL_PRICING_PATH)
+        return {}, None
+
+
+def _token_cost_calculator_html(
+    pricing: dict, pricing_updated: str | None, default_prompt: int, default_completion: int
+) -> str:
+    """Renders the /tokens cost calculator. Rebuilt 2026-08-24 from the
+    original two-number-input version, per direct user feedback after
+    seeing tokencalculator.ai:
+
+    1. Models now group by `provider` (config/model_pricing.yaml's new
+       field -- see that file's own comment) by default, instead of
+       always being sorted cheapest-first, which scattered same-vendor
+       models apart. A "Cheapest first" toggle switches back to cost
+       sort for anyone who wants that view instead.
+    2. Output tokens are now driven by a single "Input tokens" number
+       plus an "Expected output size" percentage slider (0-300%) with
+       tokencalculator.ai-style presets (Classification/RAG/Chat/Full
+       response/Long generation), rather than a second raw number
+       input the user has to fill in themselves. The percentage
+       presets are approximate labels for common ratios, not a
+       precise standard -- the slider itself is the source of truth,
+       the buttons just jump it to a reasonable starting point.
+    3. Clicking a Tokens value in the per-run table above (see
+       tokens_dashboard()'s row loop) calls bhCalcFromRun(), which
+       populates this calculator's input-tokens field and slider
+       position from THAT run's actual prompt/completion split, then
+       scrolls here -- so "what did this specific run cost elsewhere"
+       is one click away.
+    4. Clicking a model row here calls bhCalcAddColumn(), which adds
+       (or removes, if clicking the same model again) a live cost
+       column to the per-run table using that model's rate against
+       each row's OWN actual prompt/completion tokens (read from the
+       data-prompt/data-completion attributes tokens_dashboard()'s row
+       loop puts on every <tr>) -- not this calculator's hypothetical
+       input-tokens value, which only feeds the calculator table
+       itself.
+
+    Still entirely client-side (see prior version's docstring for why:
+    small pricing table, embedded as JSON, no round trip needed).
+
+    Returns a message instead of a calculator if config/model_pricing.yaml
+    failed to load or is empty.
+    """
+    if not pricing:
+        return f"""<h2 style="margin-top:32px;">Cost calculator</h2>
+<p class="sub">No pricing data found at {html.escape(_MODEL_PRICING_PATH)} --
+create that file (see the comment at the top of a fresh copy for the expected
+format) to enable this calculator.</p>"""
+
+    updated_note = f" · pricing last updated {html.escape(pricing_updated)}" if pricing_updated else ""
+    pricing_json = json.dumps(pricing)
+
+    default_pct = 5
+    if default_prompt:
+        default_pct = max(0, min(300, round(default_completion / default_prompt * 100)))
+
+    return f"""<h2 style="margin-top:32px;">Cost calculator</h2>
+<p class="sub">Manually-maintained reference pricing{updated_note} -- not a live feed;
+verify against each provider's own pricing page before trusting this for a real
+budgeting decision. Input tokens default to this dashboard's own lifetime total;
+edit it, or adjust the output-size slider, to price a hypothetical volume instead.</p>
+
+<div class="calc-inputs">
+  <label>Input tokens
+    <input type="number" id="calc-input-tokens" value="{default_prompt}" min="0" step="1">
+  </label>
+</div>
+
+<div class="calc-output-size">
+  <div class="calc-presets">
+    <button type="button" class="calc-preset" data-pct="5">Classification</button>
+    <button type="button" class="calc-preset" data-pct="25">RAG / Q&amp;A</button>
+    <button type="button" class="calc-preset" data-pct="50">Chat</button>
+    <button type="button" class="calc-preset" data-pct="100">Full response</button>
+    <button type="button" class="calc-preset" data-pct="200">Long generation</button>
+  </div>
+  <input type="range" id="calc-pct" min="0" max="300" step="1" value="{default_pct}">
+  <div class="calc-output-readout">
+    <span id="calc-output-tokens">0</span> output tokens
+    (<span id="calc-pct-readout">{default_pct}</span>% of input)
+  </div>
+</div>
+
+<div class="calc-sort-toggle">
+  <button type="button" id="calc-sort-provider" class="calc-sort-btn calc-sort-btn--active">By provider</button>
+  <button type="button" id="calc-sort-cost" class="calc-sort-btn">Cheapest first</button>
+</div>
+
+<table id="calc-table">
+  <tr><th>Model</th><th class="num">Input cost</th><th class="num">Output cost</th><th class="num">Total</th></tr>
+</table>
+<p class="sub">Click a model above to add its cost as a column to the Recent runs table.</p>
+
+<script>
+const bhModelPricing = {pricing_json};
+let bhSortMode = "provider";
+let bhActiveCostModel = null;
+
+function bhFmtUsd(n) {{
+  return "$" + n.toLocaleString(undefined, {{minimumFractionDigits: 2, maximumFractionDigits: 4}});
+}}
+
+function bhCalcRows() {{
+  const inputTokens = Math.max(0, Number(document.getElementById("calc-input-tokens").value) || 0);
+  const pct = Math.max(0, Number(document.getElementById("calc-pct").value) || 0);
+  const outputTokens = Math.round(inputTokens * pct / 100);
+  document.getElementById("calc-pct-readout").textContent = pct;
+  document.getElementById("calc-output-tokens").textContent = outputTokens.toLocaleString();
+  return Object.entries(bhModelPricing).map(([name, p]) => {{
+    const inputCost = (inputTokens / 1e6) * p.input_per_million;
+    const outputCost = (outputTokens / 1e6) * p.output_per_million;
+    return {{name, provider: p.provider || "", inputCost, outputCost, total: inputCost + outputCost}};
+  }});
+}}
+
+function bhCalcRecalc() {{
+  const rows = bhCalcRows();
+  if (bhSortMode === "cost") {{
+    rows.sort((a, b) => a.total - b.total);
+  }} else {{
+    rows.sort((a, b) => (a.provider + a.name).localeCompare(b.provider + b.name));
+  }}
+  const table = document.getElementById("calc-table");
+  table.innerHTML = "<tr><th>Model</th><th class=\\"num\\">Input cost</th>" +
+    "<th class=\\"num\\">Output cost</th><th class=\\"num\\">Total</th></tr>" +
+    rows.map(r => {{
+      const active = (r.name === bhActiveCostModel) ? " calc-row--active" : "";
+      return "<tr class=\\"calc-row" + active + "\\" data-model=\\"" + r.name.replace(/"/g, "&quot;") + "\\">" +
+        "<td>" + r.name + (r.provider ? " <span class=\\"calc-provider\\">(" + r.provider + ")</span>" : "") + "</td>" +
+        "<td class=\\"num\\">" + bhFmtUsd(r.inputCost) + "</td>" +
+        "<td class=\\"num\\">" + bhFmtUsd(r.outputCost) + "</td>" +
+        "<td class=\\"num\\"><b>" + bhFmtUsd(r.total) + "</b></td></tr>";
+    }}).join("");
+  Array.from(table.querySelectorAll("tr.calc-row")).forEach(tr => {{
+    tr.addEventListener("click", () => bhCalcAddColumn(tr.getAttribute("data-model")));
+  }});
+}}
+
+function bhCalcFromRun(anchorEl) {{
+  const tr = anchorEl.closest("tr.run-row");
+  if (!tr) return;
+  const prompt = Number(tr.getAttribute("data-prompt")) || 0;
+  const completion = Number(tr.getAttribute("data-completion")) || 0;
+  document.getElementById("calc-input-tokens").value = prompt;
+  const pct = prompt ? Math.max(0, Math.min(300, Math.round(completion / prompt * 100))) : 0;
+  document.getElementById("calc-pct").value = pct;
+  bhCalcRecalc();
+}}
+
+function bhCalcAddColumn(modelName) {{
+  const table = document.getElementById("run-table");
+  if (!table) return;
+  const headRow = table.rows[0];
+
+  // Remove any existing dynamic cost column first -- only one shown at
+  // a time, matching "click a model to add A column" (singular).
+  const existingIdx = Array.from(headRow.cells).findIndex(c => c.classList.contains("dyn-cost"));
+  if (existingIdx !== -1) {{
+    for (const row of table.rows) {{ row.deleteCell(existingIdx); }}
+  }}
+
+  if (modelName === bhActiveCostModel) {{
+    // Clicking the same model again just removes the column (toggle off).
+    bhActiveCostModel = null;
+    bhCalcRecalc();
+    return;
+  }}
+
+  bhActiveCostModel = modelName;
+  const p = bhModelPricing[modelName];
+  const th = document.createElement("th");
+  th.className = "dyn-cost num";
+  th.textContent = modelName + " cost";
+  headRow.appendChild(th);
+
+  for (let i = 1; i < table.rows.length; i++) {{
+    const row = table.rows[i];
+    if (!row.classList.contains("run-row")) continue;  // skip if a non-data row ever appears
+    const prompt = Number(row.getAttribute("data-prompt")) || 0;
+    const completion = Number(row.getAttribute("data-completion")) || 0;
+    const cost = (prompt / 1e6) * p.input_per_million + (completion / 1e6) * p.output_per_million;
+    const td = document.createElement("td");
+    td.className = "dyn-cost num";
+    td.textContent = bhFmtUsd(cost);
+    row.appendChild(td);
+  }}
+  bhCalcRecalc();
+}}
+
+document.getElementById("calc-input-tokens").addEventListener("input", bhCalcRecalc);
+document.getElementById("calc-pct").addEventListener("input", bhCalcRecalc);
+document.querySelectorAll(".calc-preset").forEach(btn => {{
+  btn.addEventListener("click", () => {{
+    document.getElementById("calc-pct").value = btn.getAttribute("data-pct");
+    bhCalcRecalc();
+  }});
+}});
+document.getElementById("calc-sort-provider").addEventListener("click", () => {{
+  bhSortMode = "provider";
+  document.getElementById("calc-sort-provider").classList.add("calc-sort-btn--active");
+  document.getElementById("calc-sort-cost").classList.remove("calc-sort-btn--active");
+  bhCalcRecalc();
+}});
+document.getElementById("calc-sort-cost").addEventListener("click", () => {{
+  bhSortMode = "cost";
+  document.getElementById("calc-sort-cost").classList.add("calc-sort-btn--active");
+  document.getElementById("calc-sort-provider").classList.remove("calc-sort-btn--active");
+  bhCalcRecalc();
+}});
+bhCalcRecalc();
+</script>"""
+
+
 @app.route("/tokens")
 def tokens_dashboard():
     """Per-run token usage view (rebuilt 2026-08-23 from the original
@@ -3334,9 +3596,12 @@ def tokens_dashboard():
                 pass  # malformed/legacy row -- results cell just shows the fallback dash
 
     if not rows:
+        pricing, pricing_updated = _load_model_pricing()
+        calculator_html = _token_cost_calculator_html(pricing, pricing_updated, default_prompt=0, default_completion=0)
         body = f"""<div class="dash-wrap">
   <div class="detail-header"><h1>Token usage</h1></div>
   <p class="sub">No token usage logged yet -- run a generate, batch generate, or score batch job first.</p>
+  {calculator_html}
 </div>"""
         return _page("Token usage", body)
 
@@ -3347,12 +3612,16 @@ def tokens_dashboard():
         job_data = jobs_by_id.get(job_id)
         results_html = _token_run_results_html(agent, job_data)
         model_label = html.escape(model) if model else "(unknown model)"
-        row_html_parts.append(f"""<tr>
+        # prompt_tokens isn't selected separately above -- tokens_used is
+        # always prompt+completion (see _log_token_usage()), so it's
+        # recovered here rather than adding a column to the query.
+        row_prompt_tokens = tokens_used - (completion_tokens or 0)
+        row_html_parts.append(f"""<tr class="run-row" data-prompt="{row_prompt_tokens}" data-completion="{completion_tokens or 0}">
   <td>{_esc(finished_at or '')}</td>
   <td>{kind_label}</td>
   <td>{model_label}</td>
   <td class="num">{_format_duration(duration_seconds)}</td>
-  <td class="num">{tokens_used:,}</td>
+  <td class="num"><a href="#cost-calculator" class="run-tok-link" onclick="bhCalcFromRun(this)" title="Load this run's tokens into the cost calculator below">{tokens_used:,}</a></td>
   <td class="num">{tok_s}</td>
   <td>{results_html}</td>
 </tr>""")
@@ -3361,11 +3630,13 @@ def tokens_dashboard():
     if total_runs > len(rows):
         cap_note = f'<p class="sub">Showing the {len(rows)} most recent of {total_runs} logged runs.</p>'
 
-    table_html = f"""<table>
+    table_html = f"""<table id="run-table">
   <tr><th>Date</th><th>Job kind</th><th>Model</th><th class="num">Duration</th><th class="num">Tokens</th>
       <th class="num">Avg tok/s</th><th>Results</th></tr>
   {''.join(row_html_parts)}
 </table>
+<p class="sub">Click a Tokens value to load that run into the calculator below. Click a model
+in the calculator to add a per-run cost column here.</p>
 {cap_note}"""
 
     by_model_html_rows = "".join(
@@ -3384,14 +3655,26 @@ def tokens_dashboard():
   <div class="stat"><span class="n">{overall_tok_s}</span><span class="label">Overall avg tok/s</span></div>
 </div>"""
 
+    total_prompt, total_completion = conn.execute(
+        "SELECT COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0) "
+        "FROM run_log WHERE tokens_used IS NOT NULL"
+    ).fetchone()
+    pricing, pricing_updated = _load_model_pricing()
+    calculator_html = _token_cost_calculator_html(
+        pricing, pricing_updated, default_prompt=total_prompt, default_completion=total_completion
+    )
+
     body = f"""<div class="dash-wrap dash-wrap--wide">
   <div class="detail-header"><h1>Token usage</h1>
-    <p class="sub">Per-run token usage and generation speed. Cost isn't shown --
-    there's no per-model $/token table in this codebase yet, so cost_usd stays
-    unset rather than guessed.</p></div>
+    <p class="sub">Per-run token usage and generation speed. The cost calculator below
+    is a separate, manually-priced reference table -- not tied to run_log.cost_usd,
+    which stays unset since there's no live pricing feed this project pulls from.</p></div>
   {summary_html}
   {table_html}
   {by_model_html}
+  <div id="cost-calculator">
+  {calculator_html}
+  </div>
 </div>"""
     return _page("Token usage", body)
 

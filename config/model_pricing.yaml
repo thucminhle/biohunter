@@ -1,0 +1,78 @@
+# BioHunter model pricing reference -- for the /tokens cost calculator
+# (dashboard.py's tokens_dashboard()). MANUALLY MAINTAINED, NOT live-fetched.
+#
+# Why manual rather than live: there is no single reliable API that returns
+# current per-token pricing across Anthropic/OpenAI/Google/DeepSeek, and the
+# dashboard's own network egress allowlist doesn't include any of those
+# providers' pricing pages anyway (see project's network config) -- scraping
+# their marketing pricing pages on every /tokens request would also be
+# fragile (pages restructure often) and slow. A periodically-updated static
+# file matches this project's own "lightweight budget logging, not a full
+# watchdog" philosophy (ADR-0002) better than either alternative.
+#
+# UPDATE THIS FILE PERIODICALLY. Prices below were verified via web search
+# on the date in last_updated -- provider pricing changes without notice
+# (Anthropic dropped Opus pricing ~67% in Feb 2026 as one example), so
+# treat any number here as approximate once it's more than a few months
+# old, and re-verify against each provider's own pricing page before
+# trusting this for a real budgeting decision.
+last_updated: "2026-08-23"
+
+# Keys are informal "provider/model" labels for DISPLAY in the calculator --
+# these are NOT required to match llm.py's actual provider/model strings
+# (those are things like "anthropic"/"claude-sonnet-5" from roles.yaml,
+# already tracked separately in run_log.model). This file exists so the
+# calculator can show costs across providers/models you're NOT necessarily
+# running locally too (e.g. comparing your actual Anthropic usage against
+# "what would this have cost on GPT-5 instead") -- it's a what-if reference
+# table, not tied one-to-one to roles.yaml.
+#
+# `provider` groups models in the calculator's "By provider" sort mode
+# (dashboard.py's /tokens page) -- add/reorder models here, they'll appear
+# grouped by this field automatically, no dashboard.py edit needed.
+models:
+  "Claude Opus 4.8":
+    provider: "Anthropic"
+    input_per_million: 5.00
+    output_per_million: 25.00
+    source: "anthropic.com/pricing (Opus tier, post Feb-2026 price cut)"
+  "Claude Sonnet 5":
+    provider: "Anthropic"
+    input_per_million: 3.00
+    output_per_million: 15.00
+    source: "anthropic.com/pricing (Sonnet tier, consistent across recent Sonnet generations)"
+  "Claude Haiku 4.5":
+    provider: "Anthropic"
+    input_per_million: 1.00
+    output_per_million: 5.00
+    source: "approximate, extrapolated from Haiku 3.5's $0.80/$4.00 -- VERIFY against anthropic.com/pricing, least confident number in this file"
+  "GPT-5":
+    provider: "OpenAI"
+    input_per_million: 1.25
+    output_per_million: 10.00
+    source: "openai.com/api/pricing"
+  "GPT-5 mini":
+    provider: "OpenAI"
+    input_per_million: 0.25
+    output_per_million: 2.00
+    source: "openai.com/api/pricing"
+  "Gemini 2.5 Pro":
+    provider: "Google"
+    input_per_million: 1.25
+    output_per_million: 10.00
+    source: "ai.google.dev/pricing (<=200K token prompts; doubles above that threshold, not modeled here)"
+  "Gemini 2.5 Flash":
+    provider: "Google"
+    input_per_million: 0.30
+    output_per_million: 2.50
+    source: "ai.google.dev/pricing (non-thinking output rate; thinking-mode output is ~5.8x higher, not modeled here)"
+  "DeepSeek Chat (V3.2)":
+    provider: "DeepSeek"
+    input_per_million: 0.28
+    output_per_million: 0.42
+    source: "deepseek.com/pricing (cache-miss input rate; cache-hit input is ~10x cheaper, not modeled here)"
+  "Local (Ollama / MLX)":
+    provider: "Local"
+    input_per_million: 0.00
+    output_per_million: 0.00
+    source: "self-hosted -- no per-token API cost, only your own electricity/hardware"
