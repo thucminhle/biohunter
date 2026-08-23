@@ -64,7 +64,8 @@
 │   │   ├── 2026-08-17_1_BioHunter-ExtensionCaptureLive-LLMExtractionScoped-Handoff.md
 │   │   ├── 2026-08-17_2_BioHunter-ExtensionExtractionFixed-DeleteRouteBuilt-ScoutComplete-Handoff.md
 │   │   ├── 2026-08-23_1_BioHunter-CaptainBatchGeneratePersistedJobs-Handoff.md
-│   │   └── 2026-08-23_2_BioHunter-TokenUsageDashboard-Handoff.md
+│   │   ├── 2026-08-23_2_BioHunter-TokenUsageDashboard-Handoff.md
+│   │   └── 2026-08-23_3_BioHunter-TokenDashboard-ModelAttribution-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md
@@ -125,6 +126,8 @@
 ├── linkedin_diagnostic.js
 ├── linkedin_diagnostic_v2.js
 ├── migrate_add_apply_url.py
+├── migrate_add_run_log_columns.py
+├── migrate_add_run_log_model.py
 ├── migrate_repost_tracking.py
 ├── pyproject.toml
 ├── README.md

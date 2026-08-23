@@ -115,7 +115,47 @@ CREATE TABLE IF NOT EXISTS run_log (
     status      TEXT,                -- 'ok' | 'error' | 'partial'
     detail      TEXT,                -- free-form: counts, error message, etc.
     tokens_used INTEGER,             -- NULL for non-LLM runs like Scout
-    cost_usd    REAL
+    cost_usd    REAL,
+    -- Added 2026-08-23 (token dashboard v2, per-run view -- previously
+    -- this table was only ever aggregated by `agent`, never displayed
+    -- per-run). job_id points back at the `jobs` table's own id -- that
+    -- table already stores each run's full result data (posting_id,
+    -- draft_id, batch results list, etc.) as JSON, so the dashboard
+    -- reads links from there at render time instead of duplicating them
+    -- here. prompt_tokens/completion_tokens are the split that
+    -- tokens_used above has always collapsed into one number -- needed
+    -- to compute avg tok/s the same way (completion_tokens / llm_seconds)
+    -- the live per-job progress badge already does elsewhere in the app,
+    -- so the two numbers agree. llm_seconds is LLM generation time only
+    -- (sum of each individual call's elapsed time) -- duration_seconds is
+    -- real wall-clock job time (job start to finish) and is usually
+    -- larger, since it also includes Qdrant fetches / DB writes that
+    -- aren't LLM calls. All five NULL for any run_log row written before
+    -- this column set existed, and for non-LLM agents (Scout) going
+    -- forward -- see migrate_add_run_log_columns.py for backfilling the
+    -- schema on an existing database.
+    job_id            TEXT,
+    prompt_tokens     INTEGER,
+    completion_tokens INTEGER,
+    llm_seconds       REAL,
+    duration_seconds  REAL,
+    -- Added 2026-08-23 (3rd addition to run_log this date -- see the
+    -- job_id/prompt_tokens/etc. block above for the per-run rework this
+    -- builds on). Distinct provider/model string(s) actually used by
+    -- this job's LLM calls, e.g. 'anthropic/claude-sonnet-5', sourced
+    -- from LLMResponse.provider + '/' + LLMResponse.model (llm.py) --
+    -- both always set by every backend, unlike the token/timing fields
+    -- above which are best-effort. If a single job's calls used more
+    -- than one distinct model (not the case today -- every role in
+    -- roles.yaml maps to exactly one model per job kind -- but not
+    -- assumed, so this doesn't silently misattribute if that changes),
+    -- this holds a comma-separated list of every distinct model used,
+    -- not just the first. NULL for any row written before this column
+    -- existed and for non-LLM agents (Scout) going forward -- see
+    -- migrate_add_run_log_model.py for backfilling the schema on an
+    -- existing database (CREATE TABLE IF NOT EXISTS never alters an
+    -- already-existing table).
+    model             TEXT
 );
 
 -- Added alongside the dashboard (the "dynamic dashboard" ADR-0006

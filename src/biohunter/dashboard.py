@@ -164,6 +164,7 @@ import html
 import json
 import logging
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -238,6 +239,16 @@ def _make_usage_callback(job_id: str):
     the total rather than raising or reporting a fake 0; llm_calls_total
     still increments so the mini-dashboard can show "N calls (M with
     usage data)" instead of a silently-undercounted total.
+
+    NEW 2026-08-23: also tracks `models_used`, a set (stored as a list --
+    job dicts are JSON-persisted via _persist_job(), and JSON has no set
+    type) of every distinct "<provider>/<model>" string seen across this
+    job's calls. response.provider/.model are always set by every
+    LLMBackend.chat() implementation (unlike the token/elapsed fields,
+    which are best-effort), so unlike those fields this is never partial
+    -- every call contributes its model, whether or not it reported
+    usage numbers. _log_token_usage() below joins this list into
+    run_log.model at the end of the job.
     """
     def _on_usage(role: str, response) -> None:
         job = _get_job(job_id) or {}
@@ -246,6 +257,7 @@ def _make_usage_callback(job_id: str):
         seconds_total = job.get("llm_seconds_total", 0.0)
         calls_total = job.get("llm_calls_total", 0) + 1
         calls_with_usage = job.get("llm_calls_with_usage", 0)
+        models_used = list(job.get("models_used", []))  # copy -- never mutate the stored list in place
 
         if response.prompt_tokens is not None:
             prompt_total += response.prompt_tokens
@@ -256,6 +268,10 @@ def _make_usage_callback(job_id: str):
         if response.prompt_tokens is not None or response.completion_tokens is not None:
             calls_with_usage += 1
 
+        model_key = f"{response.provider}/{response.model}"
+        if model_key not in models_used:
+            models_used.append(model_key)
+
         _set_job(
             job_id,
             prompt_tokens_total=prompt_total,
@@ -263,11 +279,12 @@ def _make_usage_callback(job_id: str):
             llm_seconds_total=seconds_total,
             llm_calls_total=calls_total,
             llm_calls_with_usage=calls_with_usage,
+            models_used=models_used,
         )
     return _on_usage
 
 
-def _log_token_usage(kind: str, job_id: str) -> None:
+def _log_token_usage(kind: str, job_id: str, duration_seconds: float | None = None) -> None:
     """Reads job_id's accumulated totals (written by _make_usage_callback()'s
     closure during the run) and writes ONE run_log row for the whole job.
     Fixes a bug in an earlier version of this function: that version
@@ -278,24 +295,51 @@ def _log_token_usage(kind: str, job_id: str) -> None:
     version fetches the job dict itself via _get_job(), the same way
     every other read of job state in this file already does.
 
+    duration_seconds: real wall-clock time for the whole job (caller
+    measures this with time.time() around its own run, since that's
+    precise and doesn't depend on any DB round-trip) -- distinct from
+    llm_seconds below, which is LLM generation time only and is always
+    <= duration_seconds. None (the default) writes NULL, same as every
+    other field here when data isn't available -- matches this
+    function's existing "don't fabricate a number" posture.
+
+    NEW 2026-08-23: writes run_log.model as models_used (see
+    _make_usage_callback()) joined with ", " -- almost always exactly
+    one model per job today (every role in roles.yaml maps to one model
+    per job kind), but joined rather than just taking the first entry
+    so a future job that legitimately spans two models doesn't silently
+    misattribute its tokens to only one of them. NULL (not an empty
+    string) if models_used is empty, matching every other "no data"
+    field in this function.
+
     Best-effort, like _persist_job(): a logging failure must never turn
     an already-successful generate/score run into a reported error.
     """
     job = _get_job(job_id) or {}
     prompt_tokens = job.get("prompt_tokens_total", 0)
     completion_tokens = job.get("completion_tokens_total", 0)
+    llm_seconds = job.get("llm_seconds_total", 0.0)
     calls = job.get("llm_calls_total", 0)
+    models_used = job.get("models_used", [])
+    model_str = ", ".join(models_used) if models_used else None
     total_tokens = prompt_tokens + completion_tokens
     try:
         conn = get_connection()
         init_schema(conn)
         conn.execute(
-            "INSERT INTO run_log (agent, finished_at, status, detail, tokens_used, cost_usd) "
-            "VALUES (?, datetime('now'), 'ok', ?, ?, NULL)",
+            "INSERT INTO run_log (agent, finished_at, status, detail, tokens_used, cost_usd, "
+            "job_id, prompt_tokens, completion_tokens, llm_seconds, duration_seconds, model) "
+            "VALUES (?, datetime('now'), 'ok', ?, ?, NULL, ?, ?, ?, ?, ?, ?)",
             (
                 kind,
                 f"{calls} LLM call(s), {total_tokens:,} tokens",
                 total_tokens or None,
+                job_id,
+                prompt_tokens or None,
+                completion_tokens or None,
+                llm_seconds or None,
+                duration_seconds,
+                model_str,
             ),
         )
         conn.commit()
@@ -923,6 +967,7 @@ def _run_generation(
     """
     total_steps = 10 * (revision_rounds + 1)
     step_state = {"n": 0}
+    job_start_time = time.time()
 
     def on_step(label: str) -> None:
         step_state["n"] += 1
@@ -952,7 +997,7 @@ def _run_generation(
         init_schema(conn)
         draft_id = drafts_db.save_draft(conn, posting_id, result)
         _set_job(job_id, status="done", draft_id=draft_id)
-        _log_token_usage("generate", job_id)
+        _log_token_usage("generate", job_id, duration_seconds=time.time() - job_start_time)
     except _JobCancelled:
         logger.info("generation for posting %s cancelled by user (job %s)", posting_id, job_id)
         _set_job(job_id, status="cancelled")
@@ -1011,6 +1056,7 @@ def _run_batch_generation(
       a running list, not just a final summary
     """
     total = len(items)
+    job_start_time = time.time()
     _set_job(
         job_id, status="running", kind="batch_generate",
         posting_ids=[it["posting_id"] for it in items],
@@ -1074,7 +1120,7 @@ def _run_batch_generation(
         job_id, status=("cancelled" if was_cancelled else "done"),
         results=results, succeeded=succeeded, failed=failed,
     )
-    _log_token_usage("batch_generate", job_id)
+    _log_token_usage("batch_generate", job_id, duration_seconds=time.time() - job_start_time)
 
 
 def _run_score_batch(
@@ -1107,6 +1153,7 @@ def _run_score_batch(
     _run_generation: this thread outlives the request that started it.
     """
     total = len(posting_rows)
+    job_start_time = time.time()
     _set_job(job_id, status="running", kind="score_batch", total=total, scored=0, skipped=0, current="")
     try:
         criteria = load_search_criteria()
@@ -1141,7 +1188,7 @@ def _run_score_batch(
 
         was_cancelled = (_get_job(job_id) or {}).get("cancel_requested", False)
         _set_job(job_id, status=("cancelled" if was_cancelled else "done"), scored=scored, skipped=skipped, total=total)
-        _log_token_usage("score_batch", job_id)
+        _log_token_usage("score_batch", job_id, duration_seconds=time.time() - job_start_time)
     except Exception as exc:  # noqa: BLE001
         logger.exception("score batch job %s failed", job_id)
         _set_job(job_id, status="error", error=str(exc))
@@ -1486,6 +1533,27 @@ textarea.manual-jd { width: 100%; min-height: 180px; font-family: var(--mono); f
   border: 1px solid var(--hairline); border-radius: 4px; padding: 12px; resize: vertical; }
 input[type=text].wide { width: 100%; font-family: var(--sans); font-size: 14px; padding: 8px 10px;
   border: 1px solid var(--hairline); border-radius: 4px; }
+
+/* Roomy tables (added for /tokens' per-run view, 2026-08-23) -- prior to
+   this, this file had no table styling at all, so any <table> fell back
+   to cramped browser defaults with no padding or row separation. */
+.dash-wrap--wide { max-width: 1320px; }
+table { width: 100%; border-collapse: collapse; margin: 8px 0 20px; }
+th, td { padding: 12px 16px; text-align: left; vertical-align: top; font-size: 13.5px; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint);
+  border-bottom: 2px solid var(--hairline); }
+td { border-bottom: 1px solid var(--hairline); }
+tr:last-child td { border-bottom: none; }
+td.num, th.num { text-align: right; font-family: var(--mono); }
+.token-summary { display: flex; gap: 28px; flex-wrap: wrap; background: var(--panel);
+  border: 1px solid var(--hairline); border-radius: 4px; padding: 16px 20px; margin-bottom: 20px; }
+.token-summary .stat { display: flex; flex-direction: column; gap: 2px; }
+.token-summary .stat .n { font-family: var(--mono); font-size: 20px; font-weight: 650; }
+.token-summary .stat .label { font-size: 12px; color: var(--ink-faint); }
+.result-links { font-size: 13px; }
+.result-links a { color: var(--accent); text-decoration: none; }
+.result-links a:hover { text-decoration: underline; }
+.result-links details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
 """
 
 
@@ -1505,6 +1573,7 @@ def _page(title: str, body: str) -> str:
   <a id="notif-enable" href="#" style="float:right;font-weight:500;font-size:13px;margin-right:14px;display:none;">Enable notifications</a>
   <a href="{url_for('settings_page')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Settings</a>
   <a href="{url_for('tokens_dashboard')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Token usage</a>
+  <a href="{url_for('jobs_index')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Recent jobs</a>
 </div></div>
 {body}
 <script>
@@ -1840,19 +1909,44 @@ def index():
 </div>"""
         return _page("Postings", body)
 
+    # Captain roadmap #6 fix (2026-08-23): the index cards previously
+    # decided their link purely from `draft` presence, never checking
+    # whether a generate job was already in flight for that posting --
+    # unlike posting_detail(), which has always guarded on this via
+    # _active_generate_job_for_posting(). Snapshot both active-job sets
+    # ONCE here (one _jobs_lock acquisition) rather than calling those
+    # per-posting helpers inside the loop below (which would re-acquire
+    # the lock once per card, up to POSTINGS_PER_PAGE times per request).
+    with _jobs_lock:
+        active_generate_ids = {
+            j.get("posting_id") for j in _jobs.values()
+            if j.get("kind") == "generate" and j.get("status") in _ACTIVE_STATUSES
+        }
+        active_batch_ids: set[int] = set()
+        for j in _jobs.values():
+            if j.get("kind") == "batch_generate" and j.get("status") in _ACTIVE_STATUSES:
+                active_batch_ids.update(j.get("posting_ids") or [])
+    active_posting_ids = active_generate_ids | active_batch_ids
+
     cards = []
     for posting_id, company, title, location, status, score, _first_seen_at, _description in page_rows:
         draft = drafts_by_posting.get(posting_id)
         quality_score = draft.final_score if draft else None
-        link = (
-            f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">View result</a>'
-            if draft
-            else f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">Generate</a>'
-        )
+        is_generating = posting_id in active_posting_ids
+        if draft:
+            link = f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">View result</a>'
+        elif is_generating:
+            # Still links to posting_detail -- that page shows the real
+            # live progress panel via its own in-flight check. This card
+            # just needs to stop claiming "Generate" is available.
+            link = f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">Generating…</a>'
+        else:
+            link = f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">Generate</a>'
+        checkbox_disabled = " disabled" if is_generating else ""
         cards.append(
             f"""<div class="card">
   <label class="card__select" style="font-size:12px;color:var(--ink-faint);display:flex;align-items:center;gap:6px;">
-    <input type="checkbox" name="posting_ids" value="{posting_id}" form="batch-form" onchange="updateBatchBar()"> select
+    <input type="checkbox" name="posting_ids" value="{posting_id}" form="batch-form" onchange="updateBatchBar()"{checkbox_disabled}> select
   </label>
   <div class="card__company">{_esc(company)}</div>
   <h3 class="card__title">{_esc(title)}</h3>
@@ -3090,46 +3184,214 @@ def settings_save():
     return redirect(url_for("settings_page"))
 
 
+def _format_duration(seconds: float | None) -> str:
+    """Renders a wall-clock duration as e.g. '4m 12s' or '1h 3m 0s'.
+    None (no duration recorded -- run_log rows written before the
+    2026-08-23 columns existed) renders as an em dash, not '0s'."""
+    if seconds is None:
+        return "\u2014"
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+_TOKEN_RUN_KIND_LABELS = {
+    "generate": "Generate",
+    "batch_generate": "Batch generate",
+    "score_batch": "Score batch",
+}
+
+
+def _token_run_results_html(kind: str, job_data: dict | None) -> str:
+    """Renders the 'Results' cell for one run_log row, reading from the
+    matching `jobs` table row's data_json (job_data -- already parsed,
+    None if that job was since cleared via 'Clear finished jobs' or
+    predates persisted job history). Deliberately reuses data this file
+    already stores rather than duplicating result details into run_log
+    itself -- see schema.sql's comment on run_log.job_id.
+
+    score_batch has no per-posting link list: a real run can touch
+    hundreds of postings (389 in the run that prompted this feature),
+    and _run_score_batch() only ever tracked aggregate scored/skipped
+    counts, not individual posting ids -- adding that would mean
+    re-serializing a growing list on every single posting during a
+    large batch, a real cost for a rarely-needed list. A link to the
+    postings index is the practical middle ground.
+    """
+    faint = '<span style="color:var(--ink-faint)">\u2014</span>'
+    if job_data is None:
+        return faint
+
+    if kind == "generate":
+        posting_id = job_data.get("posting_id")
+        company = job_data.get("company_name") or "?"
+        title = job_data.get("job_title") or "?"
+        label = f"{_esc(company)} \u2014 {_esc(title)}"
+        if not posting_id:
+            return label
+        href = url_for("posting_detail", posting_id=posting_id)
+        status = job_data.get("status")
+        suffix = "" if status == "done" else f" ({_esc(status or '?')})"
+        return f'<a href="{href}">{label}</a>{suffix}'
+
+    if kind == "batch_generate":
+        results = job_data.get("results") or []
+        if not results:
+            return faint
+        succeeded = sum(1 for r in results if r.get("status") == "done")
+        failed = len(results) - succeeded
+        items = []
+        for r in results:
+            posting_id = r.get("posting_id")
+            mark = "\u2713" if r.get("status") == "done" else "\u2717"
+            label = f"{_esc(r.get('company') or '?')} \u2014 {_esc(r.get('title') or '?')}"
+            if posting_id:
+                href = url_for("posting_detail", posting_id=posting_id)
+                items.append(f'<li><a href="{href}">{label}</a> {mark}</li>')
+            else:
+                items.append(f'<li>{label} {mark}</li>')
+        summary = f"{succeeded} succeeded, {failed} failed ({len(results)} total)"
+        return (
+            f'<details class="result-links"><summary>{summary}</summary>'
+            f'<ul style="margin:8px 0 0;padding-left:18px;">{"".join(items)}</ul></details>'
+        )
+
+    if kind == "score_batch":
+        scored = job_data.get("scored", 0)
+        skipped = job_data.get("skipped", 0)
+        href = url_for("index")
+        return f'{scored} scored, {skipped} skipped \u2014 <a href="{href}">view postings</a>'
+
+    return faint
+
+
 @app.route("/tokens")
 def tokens_dashboard():
-    """Aggregates run_log's tokens_used column -- now populated by every
-    LLM-calling job kind via _log_token_usage(), one row per finished
-    generate/batch_generate/score_batch job -- into a simple by-kind
-    total. Read-only, no new tables: run_log already existed for
-    exactly this purpose per ADR-0002's 'lightweight budget logging'
-    item, it just had no writer for these job kinds until now.
+    """Per-run token usage view (rebuilt 2026-08-23 from the original
+    by-kind-only aggregate -- see schema.sql's comment on run_log's new
+    columns for why a per-run view needed schema changes, not just a
+    template change). Each row is one finished generate/batch_generate/
+    score_batch job: date, duration (real wall-clock), tokens, avg
+    tok/s (completion_tokens / llm_seconds -- same formula the live
+    per-job progress badge uses elsewhere in this file, so the numbers
+    agree), model, and a Results column linking back to what that run
+    actually produced, read from the persisted `jobs` table via
+    run_log.job_id.
 
-    Fixed from an earlier broken version: that version called
-    `_page_shell(...)`, a function that doesn't exist anywhere in this
-    file (it 500'd on every visit). The real page-wrapper, used by
-    every other route in this file (see settings_page() above), is
-    `_page(title, body)`.
+    NEW 2026-08-23 (later same date): Model column added to the per-run
+    table, plus a "By model" summary breaking down total tokens per
+    distinct model -- both sourced from run_log.model (see
+    _log_token_usage()'s docstring for how that column is populated;
+    requires migrate_add_run_log_model.py to have been run against an
+    existing database, since the column doesn't exist on one created
+    before this addition). Rows logged before that migration show
+    "(unknown model)" rather than being silently dropped, so historical
+    totals stay visible, just unattributed.
+
+    Capped at the 100 most recently finished runs -- no date-range
+    filtering yet (same known gap as the original version had); the
+    summary strip at the top is a real aggregate over the WHOLE table,
+    not just the 100 shown, so cumulative totals stay accurate even
+    once history grows past that cap.
     """
     conn = get_connection()
     init_schema(conn)
-    rows = conn.execute(
-        "SELECT agent, COUNT(*), COALESCE(SUM(tokens_used), 0) "
-        "FROM run_log WHERE tokens_used IS NOT NULL GROUP BY agent ORDER BY agent"
+
+    total_row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(tokens_used), 0), "
+        "COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(llm_seconds), 0) "
+        "FROM run_log WHERE tokens_used IS NOT NULL"
+    ).fetchone()
+    total_runs, total_tokens, total_completion, total_llm_seconds = total_row
+    overall_tok_s = f"{total_completion / total_llm_seconds:.0f}" if total_llm_seconds else "n/a"
+
+    by_model_rows = conn.execute(
+        "SELECT COALESCE(model, '(unknown model)'), COUNT(*), COALESCE(SUM(tokens_used), 0) "
+        "FROM run_log WHERE tokens_used IS NOT NULL GROUP BY model ORDER BY 3 DESC"
     ).fetchall()
-    total_tokens = sum(r[2] for r in rows)
+
+    rows = conn.execute(
+        "SELECT agent, job_id, finished_at, duration_seconds, tokens_used, "
+        "completion_tokens, llm_seconds, model "
+        "FROM run_log WHERE tokens_used IS NOT NULL ORDER BY finished_at DESC LIMIT 100"
+    ).fetchall()
+
+    job_ids = [r[1] for r in rows if r[1]]
+    jobs_by_id: dict[str, dict] = {}
+    if job_ids:
+        placeholders = ",".join("?" * len(job_ids))
+        for jid, data_json in conn.execute(
+            f"SELECT id, data_json FROM jobs WHERE id IN ({placeholders})", tuple(job_ids)
+        ).fetchall():
+            try:
+                jobs_by_id[jid] = json.loads(data_json)
+            except (TypeError, ValueError):
+                pass  # malformed/legacy row -- results cell just shows the fallback dash
+
     if not rows:
-        table_html = "<p class=\"sub\">No token usage logged yet -- run a generate, batch generate, or score batch job first.</p>"
-    else:
-        row_html = "".join(
-            f"<tr><td>{html.escape(agent)}</td><td>{runs}</td><td>{tokens:,}</td></tr>"
-            for agent, runs, tokens in rows
-        )
-        table_html = f"""<table>
-  <tr><th>Job kind</th><th>Runs logged</th><th>Total tokens</th></tr>
-  {row_html}
-  <tr><td><b>Total</b></td><td></td><td><b>{total_tokens:,}</b></td></tr>
+        body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Token usage</h1></div>
+  <p class="sub">No token usage logged yet -- run a generate, batch generate, or score batch job first.</p>
+</div>"""
+        return _page("Token usage", body)
+
+    row_html_parts = []
+    for agent, job_id, finished_at, duration_seconds, tokens_used, completion_tokens, llm_seconds, model in rows:
+        kind_label = _TOKEN_RUN_KIND_LABELS.get(agent, html.escape(agent))
+        tok_s = f"{completion_tokens / llm_seconds:.0f}" if llm_seconds else "n/a"
+        job_data = jobs_by_id.get(job_id)
+        results_html = _token_run_results_html(agent, job_data)
+        model_label = html.escape(model) if model else "(unknown model)"
+        row_html_parts.append(f"""<tr>
+  <td>{_esc(finished_at or '')}</td>
+  <td>{kind_label}</td>
+  <td>{model_label}</td>
+  <td class="num">{_format_duration(duration_seconds)}</td>
+  <td class="num">{tokens_used:,}</td>
+  <td class="num">{tok_s}</td>
+  <td>{results_html}</td>
+</tr>""")
+
+    cap_note = ""
+    if total_runs > len(rows):
+        cap_note = f'<p class="sub">Showing the {len(rows)} most recent of {total_runs} logged runs.</p>'
+
+    table_html = f"""<table>
+  <tr><th>Date</th><th>Job kind</th><th>Model</th><th class="num">Duration</th><th class="num">Tokens</th>
+      <th class="num">Avg tok/s</th><th>Results</th></tr>
+  {''.join(row_html_parts)}
+</table>
+{cap_note}"""
+
+    by_model_html_rows = "".join(
+        f"<tr><td>{html.escape(model)}</td><td>{runs}</td><td>{tokens:,}</td></tr>"
+        for model, runs, tokens in by_model_rows
+    )
+    by_model_html = f"""<h2 style="margin-top:32px;">By model</h2>
+<table>
+  <tr><th>Model</th><th>Runs</th><th>Total tokens</th></tr>
+  {by_model_html_rows}
 </table>"""
-    body = f"""<div class="dash-wrap">
+
+    summary_html = f"""<div class="token-summary">
+  <div class="stat"><span class="n">{total_runs}</span><span class="label">Runs logged</span></div>
+  <div class="stat"><span class="n">{total_tokens:,}</span><span class="label">Total tokens</span></div>
+  <div class="stat"><span class="n">{overall_tok_s}</span><span class="label">Overall avg tok/s</span></div>
+</div>"""
+
+    body = f"""<div class="dash-wrap dash-wrap--wide">
   <div class="detail-header"><h1>Token usage</h1>
-    <p class="sub">Cumulative tokens per job kind, from run_log. Cost isn't shown --
+    <p class="sub">Per-run token usage and generation speed. Cost isn't shown --
     there's no per-model $/token table in this codebase yet, so cost_usd stays
     unset rather than guessed.</p></div>
+  {summary_html}
   {table_html}
+  {by_model_html}
 </div>"""
     return _page("Token usage", body)
 
