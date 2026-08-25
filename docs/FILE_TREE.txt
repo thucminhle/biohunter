@@ -67,7 +67,8 @@
 │   │   ├── 2026-08-23_1_BioHunter-CaptainBatchGeneratePersistedJobs-Handoff.md
 │   │   ├── 2026-08-23_2_BioHunter-TokenUsageDashboard-Handoff.md
 │   │   ├── 2026-08-23_3_BioHunter-TokenDashboard-ModelAttribution-Handoff.md
-│   │   └── 2026-08-24_1_BioHunter-CostCalculatorComplete-Handoff.md
+│   │   ├── 2026-08-24_1_BioHunter-CostCalculatorComplete-Handoff.md
+│   │   └── 2026-08-25_1_BioHunter-CaptainClosed-WriterEditorArchiving-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md

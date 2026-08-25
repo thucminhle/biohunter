@@ -160,6 +160,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import dataclasses
 import html
 import json
 import logging
@@ -1084,6 +1085,16 @@ def _run_batch_generation(
             job_id, batch_index=idx, current_company=company_name, current_title=job_title,
             step=0, total_steps=total_steps, current="starting…",
         )
+        conn = get_connection()
+        init_schema(conn)
+        # Regenerate-while-editing handling (Writer subsystem #4), same
+        # as the single-posting generate() route -- batch generation can
+        # also regenerate a posting that already has both a draft and an
+        # in-progress hand edit (see batch_generate_confirm()'s own
+        # docstring: "batch generation adds a new draft row, same as
+        # clicking Regenerate today"), so it needs the identical
+        # archive-before-overwrite guard, not just the single-posting path.
+        drafts_db.archive_final_edit(conn, posting_id)
         try:
             # _run_batch_generation -- INSIDE the per-posting loop, same job_id
             # (the whole batch shares one job_id, so this correctly accumulates
@@ -1099,8 +1110,6 @@ def _run_batch_generation(
                 stability=stability,
                 on_step=on_step,
             )
-            conn = get_connection()
-            init_schema(conn)
             draft_id = drafts_db.save_draft(conn, posting_id, result)
             results.append({
                 "posting_id": posting_id, "company": company_name, "title": job_title,
@@ -1484,6 +1493,25 @@ _DASHBOARD_STYLE = """
 
 .jd-box { width: 100%; min-height: 240px; font-family: var(--mono); font-size: 13px;
   border: 1px solid var(--hairline); border-radius: 4px; padding: 12px; resize: vertical; }
+
+.editor-panel { background: var(--panel); border: 1px solid var(--hairline); border-radius: 4px;
+  padding: 14px 18px; }
+.editor-panel[open] { padding-bottom: 20px; }
+.editor-panel > summary { list-style: none; cursor: pointer; font-weight: 650; font-size: 14.5px;
+  color: var(--ink); display: flex; align-items: center; gap: 8px; }
+.editor-panel > summary::-webkit-details-marker { display: none; }
+.editor-panel > summary::before {
+  content: "\25B8"; color: var(--ink-faint); display: inline-block; transition: transform 0.15s;
+}
+.editor-panel[open] > summary::before { transform: rotate(90deg); }
+.editor-panel .edited-badge { font-weight: 500; color: var(--ink-faint); font-size: 12.5px; }
+.editor-field { margin-top: 14px; }
+.editor-field label { display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px; color: var(--ink); }
+.editor-box { width: 100%; font-family: var(--mono); font-size: 13px;
+  border: 1px solid var(--hairline); border-radius: 4px; padding: 10px 12px; resize: vertical; }
+#edit_summary, #edit_cover { min-height: 100px; }
+#edit_bullets { min-height: 160px; }
+
 .form-row { margin: 14px 0; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
 label { font-size: 13.5px; color: var(--ink-soft); }
 input[type=number] { width: 64px; font-family: var(--mono); padding: 4px 6px; border: 1px solid var(--hairline); border-radius: 3px; }
@@ -2021,6 +2049,7 @@ def posting_detail(posting_id):
     if posting is None:
         abort(404)
     draft = drafts_db.get_latest_draft(conn, posting_id)
+    edit = drafts_db.get_final_edit(conn, posting_id) if draft is not None else None
 
     apply_link = (
         f' &middot; <a href="{_esc(posting["apply_url"])}" target="_blank"><strong>apply here</strong></a>'
@@ -2070,10 +2099,55 @@ def posting_detail(posting_id):
 </div>
 <div class="btn-row">
   <a class="btn" href="{url_for('posting_report', posting_id=posting_id)}">View full report</a>
+  <a class="btn btn--secondary" href="{url_for('posting_resume_preview', posting_id=posting_id)}" target="_blank">Preview resume</a>
   <a class="btn btn--secondary" href="{url_for('posting_resume_pdf', posting_id=posting_id)}">Download resume PDF</a>
+  <a class="btn btn--secondary" href="{url_for('posting_cover_letter_preview', posting_id=posting_id)}" target="_blank">Preview cover letter</a>
   <a class="btn btn--secondary" href="{url_for('posting_cover_letter_pdf', posting_id=posting_id)}">Download cover letter PDF</a>
 </div>
 <p class="sub" style="margin-top:10px;">Generated {_esc(draft.generated_at)} &middot; {draft.revision_rounds + 1} round(s)</p>"""
+
+    editor_html = ""
+    if draft is not None:
+        # Seeded from the active hand edit if one exists (final_edit,
+        # drafts_db.py), otherwise from the latest AI draft's own fields
+        # -- "the first time you click Edit" per the roadmap's wording.
+        # Deliberately does NOT touch cover_letter_blocks -- the editor
+        # only exposes the three assembled sections as plain textareas.
+        if edit is not None:
+            cur_summary = edit["tailored_summary"] or ""
+            cur_bullets = edit["tailored_bullets"] or ""
+            cur_cover = edit["cover_letter"] or ""
+            edited_badge = f' <span class="edited-badge">(edited {_esc(edit["edited_at"])})</span>'
+            reset_form = f"""<form method="post" action="{url_for('reset_edit', posting_id=posting_id)}"
+  style="margin-top:10px;"
+  onsubmit="return confirm('Discard your edits and revert to the AI draft? This can\\'t be undone.');">
+  <button class="btn btn--secondary btn--small" type="submit">Reset to AI draft</button>
+</form>"""
+        else:
+            cur_summary = draft.result.final_draft.tailored_summary or ""
+            cur_bullets = draft.result.final_draft.tailored_bullets or ""
+            cur_cover = draft.result.final_draft.cover_letter or ""
+            edited_badge = ""
+            reset_form = ""
+        editor_html = f"""<details class="editor-panel" style="margin-top:16px;"{' open' if edit is not None else ''}>
+  <summary>Edit resume &amp; cover letter{edited_badge}</summary>
+  <form method="post" action="{url_for('save_edit', posting_id=posting_id)}">
+    <div class="editor-field">
+      <label for="edit_summary">Tailored summary</label>
+      <textarea class="editor-box" name="tailored_summary" id="edit_summary">{_esc(cur_summary)}</textarea>
+    </div>
+    <div class="editor-field">
+      <label for="edit_bullets">Tailored bullets</label>
+      <textarea class="editor-box" name="tailored_bullets" id="edit_bullets">{_esc(cur_bullets)}</textarea>
+    </div>
+    <div class="editor-field">
+      <label for="edit_cover">Cover letter</label>
+      <textarea class="editor-box" name="cover_letter" id="edit_cover">{_esc(cur_cover)}</textarea>
+    </div>
+    <div class="btn-row" style="margin-top:14px;"><button class="btn" type="submit">Save edit</button></div>
+  </form>
+  {reset_form}
+</details>"""
 
     active_job = _active_generate_job_for_posting(posting_id)
     active_batch = _active_batch_job_for_posting(posting_id) if active_job is None else None
@@ -2129,8 +2203,41 @@ def posting_detail(posting_id):
   <div class="btn-row"><button class="btn" type="submit">{regenerate_label}</button></div>
 </form>"""
 
-    body = f'<div class="dash-wrap">{header}{result_html}{gen_form}</div>'
+    body = f'<div class="dash-wrap">{header}{result_html}{editor_html}{gen_form}</div>'
     return _page(posting["title"], body)
+
+
+@app.route("/postings/<int:posting_id>/edit", methods=["POST"])
+def save_edit(posting_id):
+    """Saves the current hand edit for this posting's resume/cover letter
+    into `final_edit` (drafts_db.py) -- upserted in place, always the
+    CURRENT edit, never a history (see that table's schema.sql comment).
+    Requires the posting to exist; the editor panel is only ever shown
+    once a draft has been generated, but this guards a stale
+    tab/direct POST after a posting is deleted.
+    """
+    conn = get_connection()
+    init_schema(conn)
+    posting = _get_posting(conn, posting_id)
+    if posting is None:
+        abort(404)
+    tailored_summary = request.form.get("tailored_summary", "")
+    tailored_bullets = request.form.get("tailored_bullets", "")
+    cover_letter = request.form.get("cover_letter", "")
+    drafts_db.save_final_edit(conn, posting_id, tailored_summary, tailored_bullets, cover_letter)
+    return redirect(url_for("posting_detail", posting_id=posting_id))
+
+
+@app.route("/postings/<int:posting_id>/edit/reset", methods=["POST"])
+def reset_edit(posting_id):
+    """Discards the current hand edit, reverting the editor panel (and,
+    once preview/PDF export are wired to read final_edit next, those
+    too) back to the latest AI draft's own content.
+    """
+    conn = get_connection()
+    init_schema(conn)
+    drafts_db.clear_final_edit(conn, posting_id)
+    return redirect(url_for("posting_detail", posting_id=posting_id))
 
 
 def _generate_options_html() -> str:
@@ -2155,6 +2262,14 @@ def generate(posting_id):
     posting = _get_posting(conn, posting_id)
     if posting is None:
         abort(404)
+
+    # Regenerate-while-editing handling (Writer subsystem #4): an
+    # in-progress hand edit must never be silently overwritten by the
+    # fresh draft this call is about to create, nor silently left in
+    # final_edit to collide with it. No-ops (returns False) for a first
+    # Generate, since the editor panel only exists once a draft already
+    # does -- see archive_final_edit()'s own docstring.
+    drafts_db.archive_final_edit(conn, posting_id)
 
     description = (request.form.get("description") or "").strip() or posting["description"]
     if not description:
@@ -2906,6 +3021,43 @@ def posting_report(posting_id):
     return Response(html_out, mimetype="text/html")
 
 
+def _display_draft(draft: "drafts_db.DraftRecord", edit: dict | None):
+    """Returns the WriterDraft to render for preview/export -- the active
+    hand edit's summary/bullets/cover letter merged onto the AI draft's
+    own company_name/job_title/cover_letter_blocks, or the AI draft
+    unchanged if there's no active final_edit row. Both the preview
+    routes (raw HTML) and the export routes (PDF) call this same
+    function, so they're always showing/downloading identical content
+    -- see final_edit's schema.sql comment and this file's Writer/export
+    roadmap item.
+    """
+    if edit is None:
+        return draft.result.final_draft
+    return dataclasses.replace(
+        draft.result.final_draft,
+        tailored_summary=edit["tailored_summary"] or "",
+        tailored_bullets=edit["tailored_bullets"] or "",
+        cover_letter=edit["cover_letter"] or "",
+    )
+
+
+@app.route("/postings/<int:posting_id>/resume/preview")
+def posting_resume_preview(posting_id):
+    conn = get_connection()
+    init_schema(conn)
+    draft = drafts_db.get_latest_draft(conn, posting_id)
+    if draft is None:
+        abort(404)
+    edit = drafts_db.get_final_edit(conn, posting_id)
+    settings = settings_db.get_candidate_settings(conn)
+    html_out = render_resume_html(
+        _display_draft(draft, edit),
+        candidate_name=settings.candidate_name,
+        contact_line=settings.contact_line,
+    )
+    return Response(html_out, mimetype="text/html")
+
+
 @app.route("/postings/<int:posting_id>/resume.pdf")
 def posting_resume_pdf(posting_id):
     conn = get_connection()
@@ -2913,9 +3065,10 @@ def posting_resume_pdf(posting_id):
     draft = drafts_db.get_latest_draft(conn, posting_id)
     if draft is None:
         abort(404)
+    edit = drafts_db.get_final_edit(conn, posting_id)
     settings = settings_db.get_candidate_settings(conn)
     html_out = render_resume_html(
-        draft.result.final_draft,
+        _display_draft(draft, edit),
         candidate_name=settings.candidate_name,
         contact_line=settings.contact_line,
     )
@@ -2927,6 +3080,23 @@ def posting_resume_pdf(posting_id):
     )
 
 
+@app.route("/postings/<int:posting_id>/cover-letter/preview")
+def posting_cover_letter_preview(posting_id):
+    conn = get_connection()
+    init_schema(conn)
+    draft = drafts_db.get_latest_draft(conn, posting_id)
+    if draft is None:
+        abort(404)
+    edit = drafts_db.get_final_edit(conn, posting_id)
+    settings = settings_db.get_candidate_settings(conn)
+    html_out = render_cover_letter_html(
+        _display_draft(draft, edit),
+        candidate_name=settings.candidate_name,
+        contact_line=settings.contact_line,
+    )
+    return Response(html_out, mimetype="text/html")
+
+
 @app.route("/postings/<int:posting_id>/cover-letter.pdf")
 def posting_cover_letter_pdf(posting_id):
     conn = get_connection()
@@ -2934,9 +3104,10 @@ def posting_cover_letter_pdf(posting_id):
     draft = drafts_db.get_latest_draft(conn, posting_id)
     if draft is None:
         abort(404)
+    edit = drafts_db.get_final_edit(conn, posting_id)
     settings = settings_db.get_candidate_settings(conn)
     html_out = render_cover_letter_html(
-        draft.result.final_draft,
+        _display_draft(draft, edit),
         candidate_name=settings.candidate_name,
         contact_line=settings.contact_line,
     )

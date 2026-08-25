@@ -223,6 +223,57 @@ CREATE TABLE IF NOT EXISTS jobs (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Added 2026-08-24 (Writer subsystem #4, in-dashboard editor). Holds
+-- the CURRENT in-progress hand edit for a posting -- separate from
+-- `drafts` (immutable AI-generation snapshots) so diff.py's
+-- round-to-round comparison across drafts is never affected by hand
+-- edits. One row per posting_id (PRIMARY KEY, not autoincrement),
+-- always upserted in place -- this is the current edit, not a
+-- history. Seeded from the latest draft's tailored_summary/
+-- tailored_bullets/cover_letter the first time a posting is opened
+-- for editing. A "reset to AI draft" action DELETEs this row rather
+-- than leaving an empty/stale one -- absence of a row means "no
+-- active edit," same convention drafts_db.py's get_latest_draft()
+-- already uses (None, not an empty record).
+-- NOTE FOR db.py's _split_statements(): no semicolons in comments
+-- above this line.
+CREATE TABLE IF NOT EXISTS final_edit (
+    posting_id       INTEGER PRIMARY KEY REFERENCES postings(id),
+    tailored_summary TEXT,
+    tailored_bullets TEXT,
+    cover_letter     TEXT,
+    edited_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Added 2026-08-24 (Writer subsystem #4, regenerate-while-editing
+-- handling). Preserves an in-progress final_edit row when Regenerate is
+-- clicked before it's been saved-as-final or reset -- explicitly
+-- archived, not silently discarded and not silently left in final_edit
+-- to collide with the fresh draft (this project's own norm of naming
+-- real behavior changes rather than letting them happen quietly). Read
+-- by the version-history panel (not built yet), flattened
+-- chronologically alongside drafts.result_json's own rounds, labeled
+-- there as "your edit, before regenerating". One row PER regenerate
+-- event -- unlike final_edit (always exactly one current row per
+-- posting_id), several archived_edit rows can accumulate for the same
+-- posting_id across repeated edit/regenerate cycles, which is
+-- intentional: each is a real moment in that posting's history, not a
+-- value to overwrite. edited_at is carried over unchanged from the
+-- final_edit row it came from (when the edit itself was last saved) --
+-- archived_at is when Regenerate triggered this archive, usually a
+-- different moment, and both are worth keeping.
+-- NOTE FOR db.py's _split_statements(): no semicolons in comments
+-- above this line.
+CREATE TABLE IF NOT EXISTS archived_edit (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    posting_id       INTEGER NOT NULL REFERENCES postings(id),
+    tailored_summary TEXT,
+    tailored_bullets TEXT,
+    cover_letter     TEXT,
+    edited_at        TEXT NOT NULL,
+    archived_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_postings_status ON postings(status);
 CREATE INDEX IF NOT EXISTS idx_postings_company ON postings(company_id);
 CREATE INDEX IF NOT EXISTS idx_drafts_posting ON drafts(posting_id);

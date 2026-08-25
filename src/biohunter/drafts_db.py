@@ -143,3 +143,76 @@ def latest_draft_index(conn) -> dict[int, DraftRecord]:
            ) latest ON d.posting_id = latest.posting_id AND d.id = latest.max_id"""
     ).fetchall()
     return {row[1]: _row_to_record(row) for row in rows}
+
+
+def get_final_edit(conn, posting_id: int) -> dict | None:
+    """Returns the current in-progress hand edit for a posting, or None
+    if there is no active edit (never started, or reset back to the AI
+    draft) -- same "None means absent" contract get_latest_draft() uses.
+    """
+    row = conn.execute(
+        """SELECT tailored_summary, tailored_bullets, cover_letter, edited_at
+           FROM final_edit WHERE posting_id = ?""",
+        (posting_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    tailored_summary, tailored_bullets, cover_letter, edited_at = row
+    return {
+        "tailored_summary": tailored_summary,
+        "tailored_bullets": tailored_bullets,
+        "cover_letter": cover_letter,
+        "edited_at": edited_at,
+    }
+
+
+def save_final_edit(
+    conn, posting_id: int, tailored_summary: str, tailored_bullets: str, cover_letter: str
+) -> None:
+    """Upserts the current hand edit for a posting. Always overwrites in
+    place -- final_edit holds the CURRENT edit only, never a history
+    (see its schema.sql comment).
+    """
+    conn.execute(
+        """INSERT INTO final_edit (posting_id, tailored_summary, tailored_bullets, cover_letter, edited_at)
+           VALUES (?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(posting_id) DO UPDATE SET
+               tailored_summary = excluded.tailored_summary,
+               tailored_bullets = excluded.tailored_bullets,
+               cover_letter = excluded.cover_letter,
+               edited_at = excluded.edited_at""",
+        (posting_id, tailored_summary, tailored_bullets, cover_letter),
+    )
+    conn.commit()
+
+
+def clear_final_edit(conn, posting_id: int) -> None:
+    """Deletes the current hand edit. Used by the "reset to AI draft"
+    button, and by archive_final_edit() below (which reads this row
+    into archived_edit, then calls this to clear it).
+    """
+    conn.execute("DELETE FROM final_edit WHERE posting_id = ?", (posting_id,))
+    conn.commit()
+
+
+def archive_final_edit(conn, posting_id: int) -> bool:
+    """If an active hand edit exists for this posting, moves it into
+    archived_edit (preserving its original edited_at) and clears
+    final_edit -- called right before Regenerate actually starts, so an
+    in-progress edit is never silently overwritten by the fresh draft
+    nor silently left behind to collide with it (see archived_edit's
+    schema.sql comment). Returns True if something was archived, False
+    if there was no active edit to begin with -- the common case, since
+    most regenerates don't have one in progress.
+    """
+    edit = get_final_edit(conn, posting_id)
+    if edit is None:
+        return False
+    conn.execute(
+        """INSERT INTO archived_edit (posting_id, tailored_summary, tailored_bullets, cover_letter, edited_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (posting_id, edit["tailored_summary"], edit["tailored_bullets"], edit["cover_letter"], edit["edited_at"]),
+    )
+    conn.commit()
+    clear_final_edit(conn, posting_id)
+    return True
