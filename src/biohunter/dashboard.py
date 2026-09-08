@@ -1509,6 +1509,13 @@ _DASHBOARD_STYLE = """
 .editor-field label { display: block; margin-bottom: 6px; font-weight: 600; font-size: 13px; color: var(--ink); }
 .editor-box { width: 100%; font-family: var(--mono); font-size: 13px;
   border: 1px solid var(--hairline); border-radius: 4px; padding: 10px 12px; resize: vertical; }
+.history-entry { border: 1px solid var(--hairline); border-radius: 4px; margin-top: 10px; padding: 10px 14px; }
+.history-entry > summary { cursor: pointer; font-size: 13px; color: var(--ink-faint); list-style: none; }
+.history-entry > summary::-webkit-details-marker { display: none; }
+.history-entry[open] { padding-bottom: 14px; }
+.history-entry__body { margin-top: 10px; }
+.history-entry__field-label { font-weight: 600; font-size: 12.5px; margin: 10px 0 4px; }
+.history-entry__text { white-space: pre-wrap; font-family: var(--mono); font-size: 13px; margin: 0; }
 #edit_summary, #edit_cover { min-height: 100px; }
 #edit_bullets { min-height: 160px; }
 
@@ -2041,6 +2048,66 @@ function updateBatchBar() {{
     return _page("Postings", body)
 
 
+def _history_panel_html(conn, posting_id: int) -> str:
+    """Flattens `drafts` (every generation event) and `archived_edit`
+    (every hand-edit archived when Regenerate was clicked before it was
+    saved-as-final or reset) into one chronologically descending list --
+    the exact shape archived_edit's own schema.sql comment already
+    calls for ("flattened chronologically alongside drafts.result_json's
+    own rounds, labeled there as \'your edit, before regenerating\'").
+
+    Each entry is its own nested <details> so opening the panel doesn't
+    dump every past resume/cover-letter version onto the page at once --
+    same disclosure pattern as the editor panel above it.
+    """
+    drafts = drafts_db.list_drafts_for_posting(conn, posting_id)
+    archived = drafts_db.list_archived_edits_for_posting(conn, posting_id)
+
+    entries = [(d.generated_at, "draft", d) for d in drafts]
+    entries += [(a["archived_at"], "archived_edit", a) for a in archived]
+    entries.sort(key=lambda e: e[0], reverse=True)
+
+    if not entries:
+        return ""
+
+    rows = []
+    for _, kind, item in entries:
+        if kind == "draft":
+            fd = item.result.final_draft
+            score = item.final_score if item.final_score is not None else "?"
+            label = (
+                f"Draft &middot; generated {_esc(item.generated_at)} &middot; "
+                f"score {score}/10 &middot; {item.revision_rounds + 1} round(s)"
+            )
+            summary_text, bullets_text, cover_text = (
+                fd.tailored_summary, fd.tailored_bullets, fd.cover_letter,
+            )
+        else:
+            label = (
+                f"Your edit, before regenerating &middot; edited {_esc(item['edited_at'])} "
+                f"&middot; archived {_esc(item['archived_at'])}"
+            )
+            summary_text, bullets_text, cover_text = (
+                item["tailored_summary"], item["tailored_bullets"], item["cover_letter"],
+            )
+        rows.append(f"""<details class="history-entry">
+  <summary>{label}</summary>
+  <div class="history-entry__body">
+    <p class="history-entry__field-label">Tailored summary</p>
+    <p class="history-entry__text">{_esc(summary_text or "")}</p>
+    <p class="history-entry__field-label">Tailored bullets</p>
+    <p class="history-entry__text">{_esc(bullets_text or "")}</p>
+    <p class="history-entry__field-label">Cover letter</p>
+    <p class="history-entry__text">{_esc(cover_text or "")}</p>
+  </div>
+</details>""")
+
+    return f"""<details class="editor-panel" style="margin-top:16px;">
+  <summary>Version history ({len(entries)})</summary>
+  {"".join(rows)}
+</details>"""
+
+
 @app.route("/postings/<int:posting_id>")
 def posting_detail(posting_id):
     conn = get_connection()
@@ -2149,6 +2216,8 @@ def posting_detail(posting_id):
   {reset_form}
 </details>"""
 
+    history_html = _history_panel_html(conn, posting_id) if draft is not None else ""
+
     active_job = _active_generate_job_for_posting(posting_id)
     active_batch = _active_batch_job_for_posting(posting_id) if active_job is None else None
 
@@ -2203,7 +2272,7 @@ def posting_detail(posting_id):
   <div class="btn-row"><button class="btn" type="submit">{regenerate_label}</button></div>
 </form>"""
 
-    body = f'<div class="dash-wrap">{header}{result_html}{editor_html}{gen_form}</div>'
+    body = f'<div class="dash-wrap">{header}{result_html}{editor_html}{history_html}{gen_form}</div>'
     return _page(posting["title"], body)
 
 

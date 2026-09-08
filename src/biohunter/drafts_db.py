@@ -128,6 +128,44 @@ def get_draft_by_id(conn, draft_id: int) -> DraftRecord | None:
     return _row_to_record(row) if row is not None else None
 
 
+def list_drafts_for_posting(conn, posting_id: int) -> list[DraftRecord]:
+    """All generation events for a posting, most recent first. Unlike
+    get_latest_draft() (one row) or latest_draft_index() (one row per
+    posting across ALL postings), this returns every row for ONE
+    posting -- the version-history panel's draft side.
+    """
+    rows = conn.execute(
+        """SELECT id, posting_id, generated_at, revision_rounds, final_score, result_json
+           FROM drafts WHERE posting_id = ? ORDER BY id DESC""",
+        (posting_id,),
+    ).fetchall()
+    return [_row_to_record(row) for row in rows]
+
+
+def list_archived_edits_for_posting(conn, posting_id: int) -> list[dict]:
+    """Every archived hand-edit for a posting, most recent archive first.
+    Same dict shape as get_final_edit() plus id/archived_at, since
+    archived_edit is the only one of the two tables that can hold more
+    than one row per posting_id (see its schema.sql comment).
+    """
+    rows = conn.execute(
+        """SELECT id, tailored_summary, tailored_bullets, cover_letter, edited_at, archived_at
+           FROM archived_edit WHERE posting_id = ? ORDER BY id DESC""",
+        (posting_id,),
+    ).fetchall()
+    return [
+        {
+            "id": row[0],
+            "tailored_summary": row[1],
+            "tailored_bullets": row[2],
+            "cover_letter": row[3],
+            "edited_at": row[4],
+            "archived_at": row[5],
+        }
+        for row in rows
+    ]
+
+
 def latest_draft_index(conn) -> dict[int, DraftRecord]:
     """One query for the dashboard's posting list: the latest draft per
     posting_id, for every posting that has at least one. A posting with
