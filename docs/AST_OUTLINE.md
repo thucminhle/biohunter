@@ -1060,6 +1060,14 @@ def get_latest_draft(conn, posting_id: int) -> DraftRecord | None:
 def get_draft_by_id(conn, draft_id: int) -> DraftRecord | None:
     ...
 
+def list_drafts_for_posting(conn, posting_id: int) -> list[DraftRecord]:
+    """All generation events for a posting, most recent first. Unlike"""
+    ...
+
+def list_archived_edits_for_posting(conn, posting_id: int) -> list[dict]:
+    """Every archived hand-edit for a posting, most recent archive first."""
+    ...
+
 def latest_draft_index(conn) -> dict[int, DraftRecord]:
     """One query for the dashboard's posting list: the latest draft per"""
     ...
