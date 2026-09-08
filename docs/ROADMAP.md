@@ -170,7 +170,7 @@ BioHunter.
       (`add_picture()`) cover letter templates between "Sincerely," and
       the typed name — omitted if not set, same convention as
       name/contact line today
-- [ ] **In-dashboard editor.** A new mutable row per posting (e.g.
+- [x] **In-dashboard editor.** (confirmed live 2026-08-24) A new mutable row per posting (e.g.
       `final_edit`) — separate from `drafts_db.py`'s `DraftRecord` rows,
       which stay immutable AI-generation snapshots so `diff.py`'s
       round-to-round comparison is never affected by hand edits. Seeded
@@ -178,12 +178,12 @@ BioHunter.
       `cover_letter` the first time you click Edit. Plain textareas per
       section — content is already markdown-shaped, no rich editor
       needed. A "reset to AI draft" button discards the edit.
-- [ ] **Regenerate-while-editing handling.** If you regenerate after
+- [x] **Regenerate-while-editing handling.** (confirmed live 2026-09-07) If you regenerate after
       starting an edit, the in-progress edit is archived into the
       version list below (labeled "your edit, before regenerating"), not
       silently discarded and not silently kept — named explicitly per
       this project's own norm of calling out real behavior changes.
-- [ ] **Local-LLM proofreader.** Per-section, not whole-document (keeps
+- [ ] **Local-LLM proofreader.** (not yet built -- next up, alongside DOCX export) Per-section, not whole-document (keeps
       each call small and fast on the M4). Sends just that section's
       current edited text to a local Ollama model with a narrow
       instruction — smooth grammar/phrasing, don't add or remove
@@ -191,7 +191,7 @@ BioHunter.
       word-level diff view already built for Revision History this
       session), you accept or discard per suggestion. Same
       propose-then-approve pattern as Filler/the ATS-adapter wizard.
-- [ ] **Version history panel**, collapsible per entry (plain HTML
+- [x] **Version history panel**, (confirmed live 2026-09-08, PR #1) collapsible per entry (plain HTML
       `<details>`/`<summary>`, no JS framework needed — matches the
       dashboard's existing plain-Flask approach). Two layers, flattened
       into one chronological list: revision rounds within a generation
@@ -206,7 +206,7 @@ BioHunter.
       rejected because they were wrong, not because they're worth
       revisiting, so excluding them keeps the list from getting
       cluttered.
-- [ ] Preview + PDF export both read from the edited content when a
+- [x] Preview + PDF export both read from the edited content when a
       `final_edit` row exists (falling back to the latest AI draft
       otherwise), reusing `render_resume_html`/`render_cover_letter_html`
       unchanged — same rendering function, new content source. Preview
