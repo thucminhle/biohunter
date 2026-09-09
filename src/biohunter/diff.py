@@ -96,6 +96,70 @@ def _word_diff_ops(prev_text: str, curr_text: str) -> list[tuple[str, str]]:
 
 
 @dataclass
+class WordDiffHunk:
+    """One contiguous change from a word-level diff, with a stable index
+    so the humanizer's propose/approve UI can reference "hunk 3" across
+    the propose -> apply HTTP round trip (Writer step 6). Unlike
+    _word_diff_ops's flat (tag, token) list -- built for one-shot
+    read-only rendering in Revision History -- a hunk keeps a "replace"
+    as ONE unit (original and proposed both non-empty) rather than a
+    separate delete+insert pair: accepting the delete half but not the
+    insert half of a replace is meaningless for reconstructing text, so
+    the UI only ever gets one checkbox per hunk, not two.
+    """
+    index: int
+    tag: str  # "equal" | "delete" | "insert" | "replace"
+    original: str  # original side's text for this hunk ("" if tag == "insert")
+    proposed: str  # proposed side's text for this hunk ("" if tag == "delete")
+
+
+def word_diff_hunks(original_text: str, proposed_text: str) -> list[WordDiffHunk]:
+    """Same word-level SequenceMatcher diff as _word_diff_ops (see that
+    function's docstring for why word-level, not line-level, for prose),
+    grouped into indexed hunks instead of a flat token list. Built for
+    the humanizer's per-change accept/reject UI, where each hunk needs
+    an identity a checkbox can reference, not just something to render
+    once and discard.
+
+    "equal" hunks are included, not just changes -- apply_word_diff_hunks()
+    needs the full ordered sequence, including unchanged spans, to
+    reconstruct the final text; omitting them would leave gaps.
+    """
+    original_tokens = _WORD_SPLIT_RE.findall(original_text)
+    proposed_tokens = _WORD_SPLIT_RE.findall(proposed_text)
+    matcher = difflib.SequenceMatcher(a=original_tokens, b=proposed_tokens, autojunk=False)
+
+    hunks: list[WordDiffHunk] = []
+    for i, (tag, i1, i2, j1, j2) in enumerate(matcher.get_opcodes()):
+        original_span = "".join(original_tokens[i1:i2])
+        proposed_span = "".join(proposed_tokens[j1:j2])
+        hunks.append(WordDiffHunk(index=i, tag=tag, original=original_span, proposed=proposed_span))
+    return hunks
+
+
+def apply_word_diff_hunks(hunks: list[WordDiffHunk], accepted_indices: set[int]) -> str:
+    """Reconstructs text from a word_diff_hunks() list plus the set of
+    hunk indices the user checked (accepted) in the propose/approve UI.
+
+    "equal" hunks always contribute their own text -- nothing to
+    accept/reject there. Everything else contributes proposed text if
+    accepted, original text otherwise: an unchecked "insert" contributes
+    nothing (the addition is simply skipped), an unchecked "delete"
+    contributes its original text back (the deletion is undone) -- each
+    matching what "reject this change" means in that direction.
+    """
+    parts = []
+    for hunk in hunks:
+        if hunk.tag == "equal":
+            parts.append(hunk.original)
+        elif hunk.index in accepted_indices:
+            parts.append(hunk.proposed)
+        else:
+            parts.append(hunk.original)
+    return "".join(parts)
+
+
+@dataclass
 class RoundDiff:
     round_from: int
     round_to: int

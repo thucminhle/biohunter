@@ -57,6 +57,19 @@ critic_review:
   model: gemma4:12b-mlx
   base_url: http://localhost:11434
 
+# Writer subsystem step 6 -- local-LLM humanizer/proofreader. Runs
+# per-section (summary / bullets / cover letter), narrow instruction:
+# smooth AI-generated rhythm/phrasing tells, preserve exact JD keyword
+# terms and all facts/numbers verbatim. Reuses gemma4:12b-mlx -- already
+# proven reliable for this project's writer_selection/critic_review
+# roles; revisit only if prose-fluency quality (not structured-output
+# compliance, which is what those roles actually test) proves worse
+# than a different local model.
+writer_humanizer:
+  provider: ollama
+  model: gemma4:12b-mlx
+  base_url: http://localhost:11434
+
 # Scorer's job-fit triage pass (pre-Writer -- see scorer.py's own docstring
 # for what this does and doesn't judge). Was gemma3:1b-it-qat (a "get it
 # working" fast-model pick, never load-tested for format compliance) until
