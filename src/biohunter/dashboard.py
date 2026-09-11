@@ -720,6 +720,9 @@ def _job_progress_fraction(job: dict) -> float:
     if kind == "generate":
         return _ratio(job.get("step") or 0, job.get("total_steps") or 0)
 
+    if kind == "humanize":
+        return _ratio(job.get("step") or 0, job.get("total_steps") or 0)
+
     if kind == "batch_generate":
         total = job.get("total") or 0
         if not total:
@@ -805,6 +808,30 @@ def _job_display(job_id: str, job: dict) -> tuple[str, str, str]:
             total_steps = job.get("total_steps") or 0
             step = job.get("step") or 0
             detail = f"{job.get('current') or 'starting…'}" + (f" (step {step}/{total_steps})" if total_steps else "")
+            href = url_for("job_status_page", job_id=job_id)
+        detail += _format_token_suffix(job)
+        return label, detail, href
+
+    if kind == "humanize":
+        label = f"Humanize \u2014 {job.get('company_name') or '?'} \u2014 {job.get('job_title') or '?'}"
+        posting_href = url_for("posting_detail", posting_id=job.get("posting_id")) if job.get("posting_id") else url_for("job_status_page", job_id=job_id)
+        if status == "done":
+            if job.get("any_changes"):
+                detail = "Done \u2014 suggestions ready to review"
+                href = url_for("humanize_review", job_id=job_id)
+            else:
+                detail = "Done \u2014 no changes suggested"
+                href = posting_href
+        elif status == "interrupted":
+            detail = "Interrupted by a dashboard restart \u2014 no suggestion was saved"
+            href = posting_href
+        elif status == "error":
+            detail = f"Failed: {job.get('error', '')}"
+            href = url_for("job_status_page", job_id=job_id)
+        else:
+            total_steps = job.get("total_steps") or 0
+            step = job.get("step") or 0
+            detail = f"{job.get('current') or 'starting\u2026'}" + (f" (step {step}/{total_steps})" if total_steps else "")
             href = url_for("job_status_page", job_id=job_id)
         detail += _format_token_suffix(job)
         return label, detail, href
@@ -1006,6 +1033,49 @@ def _run_generation(
         _set_job(job_id, status="cancelled")
     except Exception as exc:  # noqa: BLE001 -- surface any failure to the polling page, don't just log it
         logger.exception("generation failed for posting %s", posting_id)
+        _set_job(job_id, status="error", error=str(exc))
+
+
+def _run_humanize(job_id: str, posting_id: int, current: dict[str, str], job_description: str) -> None:
+    """Runs in a background thread, started by POST
+    /postings/<id>/humanize. Same "own DB connection, real per-unit
+    step count, try/except -> status=error" shape as _run_generation()
+    (see that function's docstring) -- deliberately not a novel
+    pattern. One step per section (3 total): step ticks AFTER each
+    section's humanize_section() call returns, matching the "on_step
+    fires on completed work" contract run_revision_loop()'s on_step
+    already uses.
+
+    Stores each section's original/proposed text pair as flat
+    original_<key>/proposed_<key> job-dict fields (JSON-safe, no nested
+    dataclasses -- job dicts round-trip through _persist_job()'s
+    json.dumps()). humanize_review() reads these to build the same
+    hunk-diff review page humanize_propose() used to render inline
+    before this refactor. humanize_apply() is UNCHANGED by this
+    refactor -- it still reads original_<key>/proposed_<key> back from
+    the review page's own hidden form fields, never from the job dict;
+    the job dict's only job is getting the proposal TO the review page.
+    """
+    total_steps = len(_HUMANIZE_SECTIONS)
+    job_start_time = time.time()
+    _set_job(job_id, status="running", step=0, total_steps=total_steps, current="starting\u2026")
+    try:
+        llm = LLMClient(usage_callback=_make_usage_callback(job_id))
+        results: dict[str, str] = {}
+        any_changes = False
+        for i, (key, label) in enumerate(_HUMANIZE_SECTIONS, start=1):
+            _set_job(job_id, current=f"Humanizing {label.lower()}\u2026")
+            original = current[key]
+            proposed = humanize_section(original, key, job_description, llm)
+            results[f"original_{key}"] = original
+            results[f"proposed_{key}"] = proposed
+            if proposed != original:
+                any_changes = True
+            _set_job(job_id, step=i, current=f"Humanized {label.lower()}")
+        _set_job(job_id, status="done", any_changes=any_changes, **results)
+        _log_token_usage("humanize", job_id, duration_seconds=time.time() - job_start_time)
+    except Exception as exc:  # noqa: BLE001 -- surface any failure to the polling page, don't just log it
+        logger.exception("humanize failed for posting %s", posting_id)
         _set_job(job_id, status="error", error=str(exc))
 
 
@@ -2370,15 +2440,20 @@ _HUMANIZE_SECTIONS: tuple[tuple[str, str], ...] = (
 
 @app.route("/postings/<int:posting_id>/humanize", methods=["POST"])
 def humanize_propose(posting_id):
-    """Writer step 6: runs the writer_humanizer role over all three
-    sections against the posting's CURRENT text (the hand edit if one
-    exists, else the latest AI draft -- same precedence the editor
-    panel itself uses, so this proposes against whatever you're
-    actually looking at) and renders a per-change accept/reject review
-    page. Nothing is written to final_edit here -- only humanize_apply()
-    below does that. Leaving this page without submitting its form IS
-    discard: no suggestion is persisted anywhere, matching this
-    project's Filler/ATS-adapter-wizard propose-then-approve pattern.
+    """Writer step 6: kicks off a BACKGROUND job that runs the
+    writer_humanizer role over all three sections against the posting's
+    CURRENT text (the hand edit if one exists, else the latest AI draft
+    -- same precedence the editor panel itself uses). Three sequential
+    local-model calls against real resume-length content can run well
+    past a single HTTP request's patience -- a real 300s read timeout
+    was hit testing this synchronously against actual content (the
+    earlier synthetic 3-bullet smoke test was too small to expose it).
+    Same class of problem this project already solved for /generate via
+    _run_generation()'s background-thread + polling-progress-bar
+    pattern (see that function's docstring) -- reused here rather than
+    re-invented. Redirects to the generic job-status polling page;
+    humanize_review() below is where the actual accept/reject review
+    page renders once the job finishes.
     """
     conn = get_connection()
     init_schema(conn)
@@ -2403,29 +2478,37 @@ def humanize_propose(posting_id):
             "cover_letter": draft.result.final_draft.cover_letter or "",
         }
 
-    job_description = posting["description"] or ""
-    llm = LLMClient()
+    job_id = uuid.uuid4().hex[:12]
+    _set_job(
+        job_id, status="queued", kind="humanize", posting_id=posting_id,
+        company_name=posting["company"], job_title=posting["title"],
+        step=0, total_steps=len(_HUMANIZE_SECTIONS), current="starting\u2026",
+    )
+    thread = threading.Thread(
+        target=_run_humanize,
+        args=(job_id, posting_id, current, posting["description"] or ""),
+        daemon=True,
+    )
+    thread.start()
+    return redirect(url_for("job_status_page", job_id=job_id))
 
-    sections_html = []
-    any_changes = False
-    try:
-        for key, label in _HUMANIZE_SECTIONS:
-            original = current[key]
-            proposed = humanize_section(original, key, job_description, llm)
-            if proposed != original:
-                any_changes = True
-            sections_html.append(_humanize_diff_html(key, label, original, proposed))
-    except Exception as exc:
-        logging.exception("writer_humanizer call failed for posting %s", posting_id)
-        body = f"""<div class="dash-wrap">
-  <h1>Humanize failed</h1>
-  <p class="sub">The local model call failed: {_esc(str(exc))}</p>
-  <p class="sub">Nothing was changed -- your current edit/draft is untouched.</p>
-  <a class="btn" href="{url_for('posting_detail', posting_id=posting_id)}">Back to posting</a>
-</div>"""
-        return _page("Humanize failed", body)
 
-    if not any_changes:
+@app.route("/postings/humanize/review/<job_id>")
+def humanize_review(job_id):
+    """Renders the per-change accept/reject review page from a finished
+    'humanize' job's stored original_<key>/proposed_<key> fields (see
+    _run_humanize()'s docstring for that shape). Nothing is written to
+    final_edit here -- only humanize_apply() below does that. Leaving
+    this page without submitting its form IS discard: no suggestion is
+    persisted anywhere, matching this project's Filler/ATS-adapter-
+    wizard propose-then-approve pattern.
+    """
+    job = _get_job(job_id)
+    if job is None or job.get("kind") != "humanize" or job.get("status") != "done":
+        abort(404)
+    posting_id = job["posting_id"]
+
+    if not job.get("any_changes"):
         body = f"""<div class="dash-wrap">
   <h1>No changes suggested</h1>
   <p class="sub">The humanizer didn't propose any changes to your current text.</p>
@@ -2433,6 +2516,10 @@ def humanize_propose(posting_id):
 </div>"""
         return _page("No changes suggested", body)
 
+    sections_html = [
+        _humanize_diff_html(key, label, job.get(f"original_{key}", ""), job.get(f"proposed_{key}", ""))
+        for key, label in _HUMANIZE_SECTIONS
+    ]
     body = f"""<div class="dash-wrap">
   <h1>Review humanized suggestions</h1>
   <p class="sub">Each highlighted change is checked by default -- uncheck anything you'd rather keep
@@ -3156,7 +3243,11 @@ async function poll() {{
       window.location = "/postings/" + j.posting_id;
       return;
     }}
-    if (j.kind === "dead_link_check" || j.kind === "scout_and_check") {{
+    if (j.status === "done" && j.kind === "humanize") {{
+    window.location = j.any_changes ? "{url_for('humanize_review', job_id=job_id)}" : ("/postings/" + j.posting_id);
+    return;
+  }}
+  if (j.kind === "dead_link_check" || j.kind === "scout_and_check") {{
       window.location = "{url_for('dead_links_results', job_id=job_id)}";
       return;
     }}
@@ -3215,6 +3306,12 @@ async function poll() {{
           (j.current_company ? ` \\u2014 last: ${{j.current_company}}` : "")
         : "Checking company career pages\\u2026";
     }}
+    setTimeout(poll, 2500);
+  }} else if (j.kind === "humanize") {{
+    el.textContent = j.status === "running" ? "Humanizing your resume\u2026 (a few minutes on local models)" : "Queued\u2026";
+    detailEl.textContent = j.total_steps
+      ? `${{j.current || "working"}} (step ${{j.step || 0}} of ${{j.total_steps}})`
+      : "";
     setTimeout(poll, 2500);
   }} else {{
     el.textContent = j.status === "running" ? "Running Writer \\u2192 Critic \\u2192 Revision\\u2026 (a few minutes on local models)" : "Queued\\u2026";
