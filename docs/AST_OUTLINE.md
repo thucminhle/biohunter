@@ -916,6 +916,21 @@ def _word_diff_ops(prev_text: str, curr_text: str) -> list[tuple[str, str]]:
     """Word-level SequenceMatcher diff for prose sections -- see the"""
     ...
 
+class WordDiffHunk:
+    """One contiguous change from a word-level diff, with a stable index"""
+    index: int
+    tag: str
+    original: str
+    proposed: str
+
+def word_diff_hunks(original_text: str, proposed_text: str) -> list[WordDiffHunk]:
+    """Same word-level SequenceMatcher diff as _word_diff_ops (see that"""
+    ...
+
+def apply_word_diff_hunks(hunks: list[WordDiffHunk], accepted_indices: set[int]) -> str:
+    """Reconstructs text from a word_diff_hunks() list plus the set of"""
+    ...
+
 class RoundDiff:
     round_from: int
     round_to: int
@@ -1090,6 +1105,39 @@ def clear_final_edit(conn, posting_id: int) -> None:
 
 def archive_final_edit(conn, posting_id: int) -> bool:
     """If an active hand edit exists for this posting, moves it into"""
+    ...
+
+```
+
+## `src/biohunter/humanizer.py`
+```python
+# humanizer.py -- Writer subsystem step 6 (refined from "local-LLM
+# proofreader" to "humanizer", per the 2026-09-09 refinement session).
+#
+# Takes one section's current text (summary / bullets / cover letter) and
+# asks a local model to smooth AI-generated rhythm/phrasing tells --
+# repetitive bullet openers, uniform sentence length, empty inflated
+# modifiers ("dynamic," "results-driven" with no metric attached),
+# mirrored clause structure -- WITHOUT touching facts, numbers, dates, or
+# exact terminology that overlaps the job description. This is a fluency
+# pass, not a rewrite: still formal, still positive, just less
+# statistically uniform.
+#
+# Like diff.py/critic.py/revision.py, this module is persistence-agnostic
+# and UI-agnostic: it takes text in, returns proposed text out, no
+# printing, no storage, no diffing. dashboard.py's propose route (Phase D)
+# is what calls diff.word_diff_hunks() on the before/after pair to build
+# the accept/reject UI; this module doesn't know that UI exists.
+#
+# Never auto-applies anything -- this module doesn't touch final_edit or
+# any other table. Same propose-then-approve boundary as Filler/the
+# ATS-adapter wizard: producing a suggestion and applying one are two
+# different, deliberately separated actions.
+
+_SECTION_INSTRUCTIONS: dict[str, str] = {'tailored_summary': 'This is a resume summary paragraph. Smooth its rhythm so it reads like a careful human wrote it, not a template: vary sentence length, avoid starting consecutive sentences with the same structure, cut inflated modifiers that carry no concrete meaning (e.g. "dynamic," "passionate," "results-driven") unless a specific number or outcome backs them up. Do not add or remove any claim, skill, or fact. Keep it formal and positive in tone -- this is a fluency pass, not a tone change.', 'tailored_bullets': 'These are resume bullet points, one per line. Vary ONLY the leading verb and connective phrasing across bullets so they don\'t all follow the identical pattern (e.g. not every bullet starting with "Led" or "Spearheaded"). Do NOT touch any noun phrase -- skills, tools, technologies, certifications, team/company names, or any number/metric must appear byte-for-byte unchanged. Do not merge, split, add, or remove bullets. Keep every bullet formal and achievement-oriented.', 'cover_letter': 'This is a cover letter. Smooth its rhythm so it reads like a careful human wrote it, not a template: vary sentence length and structure across paragraphs, cut inflated modifiers that carry no concrete meaning unless backed by a specific example, avoid mirrored/parallel clause structure repeated across consecutive sentences. Do not add or remove any claim, fact, or example. Keep it formal and positive -- this is a fluency pass, not a tone change or a persuasion rewrite.'}
+_SYSTEM_PROMPT = "You are a careful copy editor for job-application materials (resumes and cover letters). Your ONLY job is to reduce AI-generated writing tells -- repetitive sentence patterns, uniform rhythm, empty inflated language -- while leaving the substance completely untouched.\n\nHard rules, no exceptions:\n1. Never invent, add, or remove a claim, skill, achievement, number, date, or fact.\n2. Never paraphrase a term that appears in the job description below -- if the posting uses an exact phrase (a tool, skill, certification, or methodology name), your output must use that exact phrase too, verbatim.\n3. Stay within roughly the original's word count -- do not pad or compress meaningfully.\n4. Keep the tone formal and positive. You are not making this more casual, funnier, or more persuasive -- only less statistically repetitive.\n5. Output ONLY the rewritten text for the section given. No preamble, no explanation, no markdown fences, no commentary.\n\nJob description this material is tailored to (for terminology reference only -- do not summarize or reference it directly, just avoid paraphrasing away any of its exact terms):\n{job_description}\n"
+def humanize_section(text: str, section_key: str, job_description: str, llm: LLMClient, role: str='writer_humanizer') -> str:
+    """Runs one section's current text through the humanizer role and"""
     ...
 
 ```

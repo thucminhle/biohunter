@@ -32,7 +32,8 @@
 │   │   ├── 0003-automate-ats-discovery-for-scale.md
 │   │   ├── 0004-n8n-pipeline-production-ready.md
 │   │   ├── 0005-async-webhook-contract-serialized-captain-queue.md
-│   │   └── 0006-native-pipeline-auto-writer-static-report.md
+│   │   ├── 0006-native-pipeline-auto-writer-static-report.md
+│   │   └── 0007-multi-track-tagging-and-selection-mode.md
 │   ├── design
 │   │   └── biotech-job-hunter-design.md
 │   ├── handoffs
@@ -68,7 +69,8 @@
 │   │   ├── 2026-08-23_2_BioHunter-TokenUsageDashboard-Handoff.md
 │   │   ├── 2026-08-23_3_BioHunter-TokenDashboard-ModelAttribution-Handoff.md
 │   │   ├── 2026-08-24_1_BioHunter-CostCalculatorComplete-Handoff.md
-│   │   └── 2026-08-25_1_BioHunter-CaptainClosed-WriterEditorArchiving-Handoff.md
+│   │   ├── 2026-08-25_1_BioHunter-CaptainClosed-WriterEditorArchiving-Handoff.md
+│   │   └── 2026-09-08_BioHunter-WriterStep4VersionHistoryClosed-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md
@@ -105,6 +107,7 @@
 │       ├── diff.py
 │       ├── discover_ats.py
 │       ├── drafts_db.py
+│       ├── humanizer.py
 │       ├── llm.py
 │       ├── qdrant.py
 │       ├── report.py
