@@ -88,6 +88,7 @@ def humanize_section(
     llm: LLMClient,
     *,
     role: str = "writer_humanizer",
+    timeout: int = 600,
 ) -> str:
     """Runs one section's current text through the humanizer role and
     returns the proposed rewrite as plain text. Does not diff, does not
@@ -122,5 +123,19 @@ def humanize_section(
         {"role": "user", "content": f"{instruction}\n\n---\n{text}"},
     ]
 
-    response = llm.complete(role, messages)
+    # think=False explicitly -- unlike selection.py/writer.py (which pass
+    # `think` deliberately, see OllamaNativeClient.chat()'s docstring),
+    # this call never set it at all, leaving Ollama at its own default
+    # for this model. A live timeout on real bullets content (2026-09-11)
+    # is consistent with silent default-on thinking mode: a rules-based
+    # fluency pass gets no value from deliberation, so it's turned off
+    # explicitly rather than left ambiguous.
+    #
+    # timeout raised to 600s (from OllamaNativeClient's already-raised
+    # 300s default -- see that class's own docstring on why 300 was
+    # chosen) as a second line of defense: even with thinking off, a 12B
+    # local model rewriting a real multi-entry bullets section is
+    # legitimately slower than the synthetic 3-bullet smoke test this
+    # role was first verified against.
+    response = llm.complete(role, messages, think=False, timeout=timeout)
     return response.text.strip()
