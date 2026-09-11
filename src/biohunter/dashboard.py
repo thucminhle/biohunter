@@ -177,7 +177,8 @@ from .cli import DEFAULT_BAY_AREA_LOCATIONS, _log_run, keyword_filter_match
 from .config import load_companies, load_search_criteria
 from .critic import ScoreResult, parse_score
 from .db import get_connection, init_schema
-from .diff import diff_revision_result
+from .diff import apply_word_diff_hunks, diff_revision_result, word_diff_hunks
+from .humanizer import humanize_section
 from .llm import LLMClient
 from .report import _STYLE as _REPORT_STYLE
 from .report import _score_bucket, render_posting_report
@@ -1519,6 +1520,17 @@ _DASHBOARD_STYLE = """
 #edit_summary, #edit_cover { min-height: 100px; }
 #edit_bullets { min-height: 160px; }
 
+/* Writer step 6 humanizer -- review page's per-change accept/reject UI. */
+.hunk-section { border: 1px solid var(--hairline); border-radius: 4px; margin-top: 14px; padding: 12px 14px; }
+.hunk-section__label { font-weight: 650; font-size: 13.5px; margin-bottom: 8px; }
+.hunk-text { white-space: pre-wrap; font-family: var(--mono); font-size: 13px; line-height: 1.6; }
+.hunk-toggle { display: inline; cursor: pointer; }
+.hunk-toggle del { background: #fbe1e1; color: #8a1f1f; text-decoration: line-through; padding: 0 1px; }
+.hunk-toggle ins { background: #e1f5e1; color: #1f6b2e; text-decoration: none; padding: 0 1px; }
+.hunk-toggle input[type=checkbox] { margin-right: 2px; vertical-align: middle; }
+.hunk-nochange { color: var(--ink-faint); }
+.hunk-hidden-text { display: none; }
+
 .form-row { margin: 14px 0; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
 label { font-size: 13.5px; color: var(--ink-soft); }
 input[type=number] { width: 64px; font-family: var(--mono); padding: 4px 6px; border: 1px solid var(--hairline); border-radius: 3px; }
@@ -2214,6 +2226,9 @@ def posting_detail(posting_id):
     <div class="btn-row" style="margin-top:14px;"><button class="btn" type="submit">Save edit</button></div>
   </form>
   {reset_form}
+  <form method="post" action="{url_for('humanize_propose', posting_id=posting_id)}" style="margin-top:10px;">
+    <button class="btn btn--secondary btn--small" type="submit">Humanize (review suggestions)</button>
+  </form>
 </details>"""
 
     history_html = _history_panel_html(conn, posting_id) if draft is not None else ""
@@ -2306,6 +2321,167 @@ def reset_edit(posting_id):
     conn = get_connection()
     init_schema(conn)
     drafts_db.clear_final_edit(conn, posting_id)
+    return redirect(url_for("posting_detail", posting_id=posting_id))
+
+
+def _humanize_diff_html(section_key: str, label: str, original: str, proposed: str) -> str:
+    """Renders one section's word-level diff as a per-change accept/reject
+    block for the humanize review page (Writer step 6). Reuses
+    diff.word_diff_hunks() -- the same hunk boundaries humanize_apply()
+    re-derives from the hidden original/proposed textareas rendered
+    here, so the "accept_<section>_<index>" checkbox names line up
+    exactly with what gets reconstructed on submit.
+
+    "equal" hunks render as plain escaped text, no checkbox -- there's
+    nothing to accept or reject about text that didn't change.
+    """
+    hunks = word_diff_hunks(original, proposed)
+    parts = []
+    for hunk in hunks:
+        if hunk.tag == "equal":
+            parts.append(_esc(hunk.original))
+            continue
+        del_span = f"<del>{_esc(hunk.original)}</del>" if hunk.original else ""
+        ins_span = f"<ins>{_esc(hunk.proposed)}</ins>" if hunk.proposed else ""
+        parts.append(
+            f'<label class="hunk-toggle">'
+            f'<input type="checkbox" name="accept_{section_key}_{hunk.index}" checked>'
+            f"{del_span}{ins_span}</label>"
+        )
+    diff_body = (
+        "".join(parts)
+        if original != proposed
+        else f'<span class="hunk-nochange">{_esc(original)}</span>'
+    )
+    return f"""<div class="hunk-section">
+  <div class="hunk-section__label">{_esc(label)}</div>
+  <div class="hunk-text">{diff_body}</div>
+  <textarea class="hunk-hidden-text" name="original_{section_key}">{_esc(original)}</textarea>
+  <textarea class="hunk-hidden-text" name="proposed_{section_key}">{_esc(proposed)}</textarea>
+</div>"""
+
+
+_HUMANIZE_SECTIONS: tuple[tuple[str, str], ...] = (
+    ("tailored_summary", "Tailored Summary"),
+    ("tailored_bullets", "Tailored Bullets"),
+    ("cover_letter", "Cover Letter"),
+)
+
+
+@app.route("/postings/<int:posting_id>/humanize", methods=["POST"])
+def humanize_propose(posting_id):
+    """Writer step 6: runs the writer_humanizer role over all three
+    sections against the posting's CURRENT text (the hand edit if one
+    exists, else the latest AI draft -- same precedence the editor
+    panel itself uses, so this proposes against whatever you're
+    actually looking at) and renders a per-change accept/reject review
+    page. Nothing is written to final_edit here -- only humanize_apply()
+    below does that. Leaving this page without submitting its form IS
+    discard: no suggestion is persisted anywhere, matching this
+    project's Filler/ATS-adapter-wizard propose-then-approve pattern.
+    """
+    conn = get_connection()
+    init_schema(conn)
+    posting = _get_posting(conn, posting_id)
+    if posting is None:
+        abort(404)
+    draft = drafts_db.get_latest_draft(conn, posting_id)
+    if draft is None:
+        abort(404)
+    edit = drafts_db.get_final_edit(conn, posting_id)
+
+    if edit is not None:
+        current = {
+            "tailored_summary": edit["tailored_summary"] or "",
+            "tailored_bullets": edit["tailored_bullets"] or "",
+            "cover_letter": edit["cover_letter"] or "",
+        }
+    else:
+        current = {
+            "tailored_summary": draft.result.final_draft.tailored_summary or "",
+            "tailored_bullets": draft.result.final_draft.tailored_bullets or "",
+            "cover_letter": draft.result.final_draft.cover_letter or "",
+        }
+
+    job_description = posting["description"] or ""
+    llm = LLMClient()
+
+    sections_html = []
+    any_changes = False
+    try:
+        for key, label in _HUMANIZE_SECTIONS:
+            original = current[key]
+            proposed = humanize_section(original, key, job_description, llm)
+            if proposed != original:
+                any_changes = True
+            sections_html.append(_humanize_diff_html(key, label, original, proposed))
+    except Exception as exc:
+        logging.exception("writer_humanizer call failed for posting %s", posting_id)
+        body = f"""<div class="dash-wrap">
+  <h1>Humanize failed</h1>
+  <p class="sub">The local model call failed: {_esc(str(exc))}</p>
+  <p class="sub">Nothing was changed -- your current edit/draft is untouched.</p>
+  <a class="btn" href="{url_for('posting_detail', posting_id=posting_id)}">Back to posting</a>
+</div>"""
+        return _page("Humanize failed", body)
+
+    if not any_changes:
+        body = f"""<div class="dash-wrap">
+  <h1>No changes suggested</h1>
+  <p class="sub">The humanizer didn't propose any changes to your current text.</p>
+  <a class="btn" href="{url_for('posting_detail', posting_id=posting_id)}">Back to posting</a>
+</div>"""
+        return _page("No changes suggested", body)
+
+    body = f"""<div class="dash-wrap">
+  <h1>Review humanized suggestions</h1>
+  <p class="sub">Each highlighted change is checked by default -- uncheck anything you'd rather keep
+  as written, then Apply. Leaving this page without clicking Apply discards everything below;
+  nothing is saved yet.</p>
+  <form method="post" action="{url_for('humanize_apply', posting_id=posting_id)}">
+    {''.join(sections_html)}
+    <div class="btn-row" style="margin-top:18px;">
+      <button class="btn" type="submit">Apply selected changes</button>
+      <a class="btn btn--secondary" href="{url_for('posting_detail', posting_id=posting_id)}">Discard all</a>
+    </div>
+  </form>
+</div>"""
+    return _page("Review humanized suggestions", body)
+
+
+@app.route("/postings/<int:posting_id>/humanize/apply", methods=["POST"])
+def humanize_apply(posting_id):
+    """Reconstructs each section from the hunks the user (un)checked on
+    the review page and writes the result into final_edit -- the only
+    point in the whole humanize flow that touches the database.
+    Re-derives word_diff_hunks() from the same original/proposed text
+    pair the review page rendered (round-tripped as hidden form
+    fields) rather than storing hunks server-side anywhere;
+    SequenceMatcher is deterministic on the same input pair, so this
+    reproduces the exact same hunk boundaries with no new table needed.
+    """
+    conn = get_connection()
+    init_schema(conn)
+    posting = _get_posting(conn, posting_id)
+    if posting is None:
+        abort(404)
+
+    finals: dict[str, str] = {}
+    for key, _label in _HUMANIZE_SECTIONS:
+        original = request.form.get(f"original_{key}", "")
+        proposed = request.form.get(f"proposed_{key}", "")
+        hunks = word_diff_hunks(original, proposed)
+        accepted = {
+            hunk.index
+            for hunk in hunks
+            if request.form.get(f"accept_{key}_{hunk.index}") is not None
+        }
+        finals[key] = apply_word_diff_hunks(hunks, accepted)
+
+    drafts_db.save_final_edit(
+        conn, posting_id,
+        finals["tailored_summary"], finals["tailored_bullets"], finals["cover_letter"],
+    )
     return redirect(url_for("posting_detail", posting_id=posting_id))
 
 
