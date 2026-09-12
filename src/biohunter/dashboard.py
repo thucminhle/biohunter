@@ -1526,20 +1526,37 @@ def _get_posting(conn, posting_id: int) -> dict | None:
 # ---------------------------------------------------------------------------
 
 _DASHBOARD_STYLE = """
+/* Workspace subsystem visual refresh, 2026-09-12 -- same palette
+   (deliberately: full theming is deferred), tighter hierarchy/spacing
+   and a real flex topbar nav instead of the old floated-link stack. */
 .topbar {
-  background: var(--ink); color: #F6F7F5; padding: 18px 24px;
+  background: var(--ink); color: #F6F7F5; padding: 14px 24px;
 }
-.topbar a { color: #F6F7F5; text-decoration: none; font-weight: 650; font-size: 15px; }
-.topbar__wrap { max-width: 1040px; margin: 0 auto; }
-.dash-wrap { max-width: 1040px; margin: 0 auto; padding: 28px 24px 96px; }
+.topbar__wrap {
+  max-width: 1040px; margin: 0 auto; display: flex; align-items: center; gap: 28px;
+}
+.topbar__brand {
+  color: #F6F7F5; text-decoration: none; font-weight: 700; font-size: 16px; letter-spacing: 0.01em;
+}
+.topbar__nav { display: flex; gap: 20px; margin-right: auto; }
+.topbar__nav a {
+  color: #C7D0CB; text-decoration: none; font-weight: 600; font-size: 13.5px;
+  padding: 4px 0; border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s;
+}
+.topbar__nav a:hover { color: #F6F7F5; border-bottom-color: var(--accent); }
+.topbar__status { display: flex; align-items: center; gap: 14px; font-size: 12.5px; color: #C7D0CB; }
+.topbar__status a { color: inherit; text-decoration: underline; }
+.dash-wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 96px; }
 
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 18px; }
 .card {
-  background: var(--panel); border: 1px solid var(--hairline); border-radius: 4px;
+  background: var(--panel); border: 1px solid var(--hairline); border-radius: 8px;
   padding: 18px 20px; display: flex; flex-direction: column; gap: 6px;
+  box-shadow: 0 1px 2px rgba(23, 35, 31, 0.04); transition: box-shadow 0.15s, transform 0.15s;
 }
-.card__company { font-size: 12px; font-family: var(--mono); color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
-.card__title { font-size: 16px; font-weight: 650; margin: 0; }
+.card:hover { box-shadow: 0 4px 14px rgba(23, 35, 31, 0.09); transform: translateY(-1px); }
+.card__company { font-size: 11.5px; font-family: var(--mono); color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; }
+.card__title { font-size: 16.5px; font-weight: 650; margin: 2px 0 0; line-height: 1.3; }
 .card__meta { font-size: 12.5px; color: var(--ink-faint); }
 .card__footer { margin-top: 10px; display: flex; align-items: center; justify-content: space-between; }
 .badge {
@@ -1709,12 +1726,17 @@ def _page(title: str, body: str) -> str:
 </head>
 <body>
 <div class="topbar"><div class="topbar__wrap">
-  <a href="{url_for('index')}">BioHunter</a>
-  <span id="job-indicator" style="float:right;font-size:13px;color:var(--ink-faint);"></span>
-  <a id="notif-enable" href="#" style="float:right;font-weight:500;font-size:13px;margin-right:14px;display:none;">Enable notifications</a>
-  <a href="{url_for('settings_page')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Settings</a>
-  <a href="{url_for('tokens_dashboard')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Token usage</a>
-  <a href="{url_for('jobs_index')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Recent jobs</a>
+  <a class="topbar__brand" href="{url_for('index')}">BioHunter</a>
+  <nav class="topbar__nav">
+    <a href="{url_for('index')}">Postings</a>
+    <a href="{url_for('jobs_index')}">Jobs</a>
+    <a href="{url_for('tokens_dashboard')}">Token usage</a>
+    <a href="{url_for('settings_page')}">Settings</a>
+  </nav>
+  <div class="topbar__status">
+    <a id="notif-enable" href="#" style="display:none;">Enable notifications</a>
+    <span id="job-indicator"></span>
+  </div>
 </div></div>
 {body}
 <script>
