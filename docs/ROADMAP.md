@@ -151,7 +151,7 @@ layer, exposed differently per layout rather than built as a fourth page.
 No longer just an export format question — this subsystem now owns the
 whole post-generation workflow. **Old workflow:** generate → download
 DOCX → edit in Pages → re-export PDF → submit. **New workflow:**
-generate → edit in-dashboard → optional local-LLM proofread pass →
+generate → edit in-dashboard → optional local-LLM humanize pass →
 export PDF → submit. DOCX doesn't disappear, it just changes role — no
 longer a required step, still there if you ever want to edit outside
 BioHunter.
@@ -183,14 +183,33 @@ BioHunter.
       version list below (labeled "your edit, before regenerating"), not
       silently discarded and not silently kept — named explicitly per
       this project's own norm of calling out real behavior changes.
-- [ ] **Local-LLM proofreader.** (not yet built -- next up, alongside DOCX export) Per-section, not whole-document (keeps
-      each call small and fast on the M4). Sends just that section's
-      current edited text to a local Ollama model with a narrow
-      instruction — smooth grammar/phrasing, don't add or remove
-      substance. Never applies silently: shows a diff (reusing the
-      word-level diff view already built for Revision History this
-      session), you accept or discard per suggestion. Same
-      propose-then-approve pattern as Filler/the ATS-adapter wizard.
+- [x] **Local-LLM humanizer**, refined from "proofreader" (confirmed
+      live 2026-09-11, PRs #3-#6). Per-section, not whole-document
+      (keeps each call small and fast on the M4) -- runs on all three
+      sections (summary/bullets/cover letter), bullets under the
+      strictest instruction (touch only the leading verb/connective
+      words, never a noun phrase, since bullets carry the most
+      JD-keyword density). Reframed from plain grammar-proofing to
+      actively smoothing AI-generated rhythm/phrasing tells
+      (repetitive bullet openers, uniform sentence length, empty
+      inflated modifiers, mirrored clause structure) while staying
+      formal/positive and preserving exact JD keyword terms and all
+      facts/numbers verbatim -- a fluency pass, not a tone change.
+      Never applies silently: shows a per-change word-level diff
+      (`diff.py`'s new `word_diff_hunks()`/`apply_word_diff_hunks()`,
+      built alongside the existing word-level diff view from Revision
+      History), you accept or discard each individual change, not just
+      per section. Same propose-then-approve pattern as Filler/the
+      ATS-adapter wizard. Runs as a background job + polling progress
+      bar (`_run_humanize()`, same pattern as Captain's
+      `_run_generation()`) -- required after a real 300s timeout
+      against actual resume-length content; the earlier synchronous
+      version only ever passed a synthetic smoke test. Root cause was
+      `think` never being passed explicitly to the local model call
+      (every other Ollama-backed role passes it deliberately) --
+      `think=False` plus a raised 600s per-call ceiling in
+      `humanize_section()` fixed it, confirmed via a direct Ollama API
+      timing test (26 tok/s, healthy, no runaway reasoning).
 - [x] **Version history panel**, (confirmed live 2026-09-08, PR #1) collapsible per entry (plain HTML
       `<details>`/`<summary>`, no JS framework needed — matches the
       dashboard's existing plain-Flask approach). Two layers, flattened
