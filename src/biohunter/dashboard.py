@@ -172,7 +172,7 @@ from datetime import datetime, timezone
 import yaml
 from flask import Flask, Response, abort, jsonify, redirect, request, url_for
 
-from . import drafts_db, settings_db
+from . import dashboard_settings, drafts_db, settings_db
 from .cli import DEFAULT_BAY_AREA_LOCATIONS, _log_run, keyword_filter_match
 from .config import load_companies, load_search_criteria
 from .critic import ScoreResult, parse_score
@@ -1948,7 +1948,7 @@ def _score_batch_form_html(filters: dict, matched_count: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = None) -> tuple[list[tuple], list[tuple]]:
+def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = None, sort: str = "company") -> tuple[list[tuple], list[tuple]]:
     """The SQL query + keyword/location filtering index() has always done,
     extracted so POST /postings/score-batch can run Scorer over EXACTLY
     the same filtered set the cards were rendered from -- one filtering
@@ -1962,6 +1962,19 @@ def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = Non
     (score_batch_route()), so BOTH callers apply the SAME draft filter
     rather than index() alone drifting from what Scorer actually runs
     over.
+
+    2026-09-12 addition (Workspace subsystem): `sort` picks the order
+    filtered_rows come back in. "company" (default) keeps the original
+    company/title order every existing caller still expects. "score_desc"
+    orders by postings.score (the job-fit score) -- done in SQL since
+    it's a plain column; NULLs sort last via `postings.score IS NULL`
+    as the primary sort key (SQLite/libSQL evaluate booleans as 0/1, so
+    NULL, which reads as 1/true, sorts after real scores). "quality_desc"
+    orders by the draft's Critic final_score -- done in Python AFTER the
+    query, since that's a join against drafts_by_posting, not a postings
+    column; postings with no draft sort last, not first, so undrafted
+    postings don't crowd out the drafted ones you're actually trying to
+    compare (master-detail's use case).
 
     Returns (all_rows, filtered_rows); each row is (id, company, title,
     location, status, score, first_seen_at, description) -- description
@@ -1987,7 +2000,10 @@ def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = Non
     if filters["min_score"]:
         query += " AND postings.score >= ?"
         params.append(float(filters["min_score"]))
-    query += " ORDER BY companies.name, postings.title"
+    if sort == "score_desc":
+        query += " ORDER BY postings.score IS NULL, postings.score DESC, companies.name, postings.title"
+    else:
+        query += " ORDER BY companies.name, postings.title"
 
     all_rows = conn.execute(query, tuple(params)).fetchall()
 
@@ -1998,13 +2014,21 @@ def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = Non
         and keyword_filter_match(row[3] or "", location_include, [])
     ]
 
-    if filters.get("draft_status") in ("has", "none"):
+    needs_drafts = filters.get("draft_status") in ("has", "none") or sort == "quality_desc"
+    if needs_drafts:
         if drafts_by_posting is None:
             drafts_by_posting = drafts_db.latest_draft_index(conn)
-        if filters["draft_status"] == "has":
+        if filters.get("draft_status") == "has":
             filtered_rows = [row for row in filtered_rows if row[0] in drafts_by_posting]
-        else:
+        elif filters.get("draft_status") == "none":
             filtered_rows = [row for row in filtered_rows if row[0] not in drafts_by_posting]
+
+    if sort == "quality_desc":
+        def _quality_sort_key(row):
+            draft = drafts_by_posting.get(row[0])
+            score = draft.final_score if draft else None
+            return (score is None, -(score or 0))
+        filtered_rows = sorted(filtered_rows, key=_quality_sort_key)
 
     return all_rows, filtered_rows
 
