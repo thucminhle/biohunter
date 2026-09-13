@@ -2236,15 +2236,20 @@ def index():
         draft = drafts_by_posting.get(posting_id)
         quality_score = draft.final_score if draft else None
         is_generating = posting_id in active_posting_ids
+        # 2026-09-12 (Workspace subsystem): cards now open the
+        # master-detail split view (?selected=<id>, current filters
+        # preserved) instead of jumping straight to the standalone
+        # /postings/<id> page -- that page still renders identically
+        # via the shared _posting_detail_body(), it's just no longer
+        # the primary click target from the grid, since the whole
+        # point of Workspace was fixing hard-to-navigate postings.
+        card_href = f'{url_for("index")}?{_filters_query_string(filters, selected=posting_id)}'
         if draft:
-            link = f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">View result</a>'
+            link = f'<a class="card__link" href="{card_href}">View result</a>'
         elif is_generating:
-            # Still links to posting_detail -- that page shows the real
-            # live progress panel via its own in-flight check. This card
-            # just needs to stop claiming "Generate" is available.
-            link = f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">Generating…</a>'
+            link = f'<a class="card__link" href="{card_href}">Generating…</a>'
         else:
-            link = f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">Generate</a>'
+            link = f'<a class="card__link" href="{card_href}">Generate</a>'
         checkbox_disabled = " disabled" if is_generating else ""
         cards.append(
             f"""<div class="card">
