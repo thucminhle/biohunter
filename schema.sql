@@ -274,6 +274,24 @@ CREATE TABLE IF NOT EXISTS archived_edit (
     archived_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Added 2026-09-12 (Workspace subsystem, dashboard_settings). Singleton
+-- row (id=1, same CHECK/upsert pattern as candidate_settings) holding
+-- dashboard-wide presentation preferences -- layout_mode picks which of
+-- Workspace's three interchangeable renderers is active -- palette is
+-- reserved for the future 10-palette system (roadmap, deferred this
+-- session) and only ever holds the one default value for now. Kept as
+-- its own table rather than folded into candidate_settings on purpose --
+-- one module, one concern, same reasoning settings_db.py's own docstring
+-- already gives for why candidate_settings isn't a config yaml file.
+-- NOTE FOR db.py's _split_statements(): no semicolons in comments
+-- above this line.
+CREATE TABLE IF NOT EXISTS dashboard_settings (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    layout_mode TEXT NOT NULL DEFAULT 'master_detail',
+    palette     TEXT NOT NULL DEFAULT 'default',
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_postings_status ON postings(status);
 CREATE INDEX IF NOT EXISTS idx_postings_company ON postings(company_id);
 CREATE INDEX IF NOT EXISTS idx_drafts_posting ON drafts(posting_id);

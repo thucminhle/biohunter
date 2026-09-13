@@ -70,14 +70,15 @@
 │   │   ├── 2026-08-23_3_BioHunter-TokenDashboard-ModelAttribution-Handoff.md
 │   │   ├── 2026-08-24_1_BioHunter-CostCalculatorComplete-Handoff.md
 │   │   ├── 2026-08-25_1_BioHunter-CaptainClosed-WriterEditorArchiving-Handoff.md
-│   │   └── 2026-09-08_BioHunter-WriterStep4VersionHistoryClosed-Handoff.md
+│   │   ├── 2026-09-08_BioHunter-WriterStep4VersionHistoryClosed-Handoff.md
+│   │   ├── 2026-09-11_BioHunter-WriterStep6HumanizerClosed-Handoff.md
+│   │   └── 2026-09-13_BioHunter-WorkspaceSubsystemFoundation-Handoff.md
 │   ├── AST_OUTLINE.md
 │   ├── FILE_TREE.txt
 │   ├── HANDOFF.md
 │   └── ROADMAP.md
 ├── scripts
 │   ├── endpoint_parity_test.py
-│   ├── generate_outline copy.py
 │   ├── generate_outline.py
 │   └── run_hooks.sh
 ├── src
@@ -102,6 +103,7 @@
 │       ├── config.py
 │       ├── critic.py
 │       ├── dashboard.py
+│       ├── dashboard_settings.py
 │       ├── db.py
 │       ├── detect_ats.py
 │       ├── diff.py

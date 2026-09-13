@@ -172,7 +172,7 @@ from datetime import datetime, timezone
 import yaml
 from flask import Flask, Response, abort, jsonify, redirect, request, url_for
 
-from . import drafts_db, settings_db
+from . import dashboard_settings, drafts_db, settings_db
 from .cli import DEFAULT_BAY_AREA_LOCATIONS, _log_run, keyword_filter_match
 from .config import load_companies, load_search_criteria
 from .critic import ScoreResult, parse_score
@@ -1526,22 +1526,59 @@ def _get_posting(conn, posting_id: int) -> dict | None:
 # ---------------------------------------------------------------------------
 
 _DASHBOARD_STYLE = """
+/* Workspace subsystem visual refresh, 2026-09-12 -- same palette
+   (deliberately: full theming is deferred), tighter hierarchy/spacing
+   and a real flex topbar nav instead of the old floated-link stack. */
 .topbar {
-  background: var(--ink); color: #F6F7F5; padding: 18px 24px;
+  background: var(--ink); color: #F6F7F5; padding: 14px 24px;
 }
-.topbar a { color: #F6F7F5; text-decoration: none; font-weight: 650; font-size: 15px; }
-.topbar__wrap { max-width: 1040px; margin: 0 auto; }
-.dash-wrap { max-width: 1040px; margin: 0 auto; padding: 28px 24px 96px; }
+.topbar__wrap {
+  max-width: 1040px; margin: 0 auto; display: flex; align-items: center; gap: 28px;
+}
+.topbar__brand {
+  color: #F6F7F5; text-decoration: none; font-weight: 700; font-size: 16px; letter-spacing: 0.01em;
+}
+.topbar__nav { display: flex; gap: 20px; margin-right: auto; }
+.topbar__nav a {
+  color: #C7D0CB; text-decoration: none; font-weight: 600; font-size: 13.5px;
+  padding: 4px 0; border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s;
+}
+.topbar__nav a:hover { color: #F6F7F5; border-bottom-color: var(--accent); }
+.topbar__status { display: flex; align-items: center; gap: 14px; font-size: 12.5px; color: #C7D0CB; }
+.topbar__status a { color: inherit; text-decoration: underline; }
+.dash-wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 96px; }
 
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 18px; }
 .card {
-  background: var(--panel); border: 1px solid var(--hairline); border-radius: 4px;
+  background: var(--panel); border: 1px solid var(--hairline); border-radius: 8px;
   padding: 18px 20px; display: flex; flex-direction: column; gap: 6px;
+  box-shadow: 0 1px 2px rgba(23, 35, 31, 0.04); transition: box-shadow 0.15s, transform 0.15s;
 }
-.card__company { font-size: 12px; font-family: var(--mono); color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
-.card__title { font-size: 16px; font-weight: 650; margin: 0; }
+.card:hover { box-shadow: 0 4px 14px rgba(23, 35, 31, 0.09); transform: translateY(-1px); }
+.card__company { font-size: 11.5px; font-family: var(--mono); color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; }
+.card__title { font-size: 16.5px; font-weight: 650; margin: 2px 0 0; line-height: 1.3; }
 .card__meta { font-size: 12.5px; color: var(--ink-faint); }
 .card__footer { margin-top: 10px; display: flex; align-items: center; justify-content: space-between; }
+
+/* Workspace subsystem, 2026-09-12: master-detail layout (Layout 1 --
+   built and shipped first per the roadmap's explicit build-order
+   warning; Layouts 2/3 (kanban, timeline) are NOT started). */
+.workspace { display: flex; gap: 20px; align-items: flex-start; margin-top: 4px; }
+.workspace__list {
+  width: 320px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px;
+  max-height: calc(100vh - 220px); overflow-y: auto; padding-right: 4px;
+}
+.workspace__row {
+  display: block; background: var(--panel); border: 1px solid var(--hairline); border-radius: 6px;
+  padding: 10px 12px; text-decoration: none; color: var(--ink);
+}
+.workspace__row:hover { border-color: var(--accent); }
+.workspace__row--active { border-color: var(--accent); background: var(--accent-soft); }
+.workspace__row-company { font-size: 11px; font-family: var(--mono); color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
+.workspace__row-title { font-size: 14px; font-weight: 650; margin: 2px 0 6px; line-height: 1.3; }
+.workspace__row-meta { display: flex; gap: 6px; }
+.workspace__detail { flex: 1; min-width: 0; }
+.workspace__detail-nav { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; font-size: 13px; color: var(--ink-faint); }
 .badge {
   font-family: var(--mono); font-size: 12px; padding: 3px 9px; border-radius: 3px; font-weight: 600;
 }
@@ -1709,12 +1746,17 @@ def _page(title: str, body: str) -> str:
 </head>
 <body>
 <div class="topbar"><div class="topbar__wrap">
-  <a href="{url_for('index')}">BioHunter</a>
-  <span id="job-indicator" style="float:right;font-size:13px;color:var(--ink-faint);"></span>
-  <a id="notif-enable" href="#" style="float:right;font-weight:500;font-size:13px;margin-right:14px;display:none;">Enable notifications</a>
-  <a href="{url_for('settings_page')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Settings</a>
-  <a href="{url_for('tokens_dashboard')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Token usage</a>
-  <a href="{url_for('jobs_index')}" style="float:right;font-weight:500;font-size:13.5px;margin-right:14px;">Recent jobs</a>
+  <a class="topbar__brand" href="{url_for('index')}">BioHunter</a>
+  <nav class="topbar__nav">
+    <a href="{url_for('index')}">Postings</a>
+    <a href="{url_for('jobs_index')}">Jobs</a>
+    <a href="{url_for('tokens_dashboard')}">Token usage</a>
+    <a href="{url_for('settings_page')}">Settings</a>
+  </nav>
+  <div class="topbar__status">
+    <a id="notif-enable" href="#" style="display:none;">Enable notifications</a>
+    <span id="job-indicator"></span>
+  </div>
 </div></div>
 {body}
 <script>
@@ -1847,6 +1889,14 @@ def _parse_filters(args) -> dict:
         "min_score": (args.get("min_score") or "").strip(),
         "draft_status": args.get("draft_status") if args.get("draft_status") in ("has", "none") else "",
         "page": max(1, int(args.get("page") or 1)) if str(args.get("page") or "1").isdigit() else 1,
+        # 2026-09-12 additions (Workspace subsystem): `sort` picks
+        # _filtered_postings()'s ordering; `selected` is the posting_id
+        # for index()'s master-detail column, parsed manually (not via
+        # request.args' own type=int) since this dict is also built from
+        # plain dicts elsewhere (score_batch_route()'s hidden-field POST
+        # body isn't a werkzeug MultiDict).
+        "sort": args.get("sort") if args.get("sort") in ("company", "score_desc", "quality_desc") else "company",
+        "selected": int(args.get("selected")) if str(args.get("selected") or "").isdigit() else None,
     }
 
 
@@ -1858,6 +1908,7 @@ def _filters_query_string(filters: dict, **overrides) -> str:
         "bay_area": "1" if filters["bay_area"] else "", "company": filters["company"],
         "date_from": filters["date_from"], "date_to": filters["date_to"],
         "min_score": filters["min_score"], "draft_status": filters["draft_status"], "page": filters["page"],
+        "sort": filters["sort"],
     }
     merged.update(overrides)
     from urllib.parse import urlencode
@@ -1908,6 +1959,12 @@ def _filter_bar_html(filters: dict, companies: list[str]) -> str:
       <option value="has" {"selected" if filters['draft_status'] == 'has' else ""}>Has draft</option>
       <option value="none" {"selected" if filters['draft_status'] == 'none' else ""}>No draft yet</option>
     </select></div>
+  <div class="field"><label for="f-sort">Sort by</label>
+    <select id="f-sort" name="sort">
+      <option value="company" {"selected" if filters['sort'] == 'company' else ""}>Company / title</option>
+      <option value="score_desc" {"selected" if filters['sort'] == 'score_desc' else ""}>Fit score (high to low)</option>
+      <option value="quality_desc" {"selected" if filters['sort'] == 'quality_desc' else ""}>Draft quality (high to low)</option>
+    </select></div>
   <div class="actions">
     <button class="btn btn--small" type="submit">Apply</button>
     <a class="btn btn--secondary btn--small" href="{url_for('index')}">Clear</a>
@@ -1948,7 +2005,7 @@ def _score_batch_form_html(filters: dict, matched_count: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = None) -> tuple[list[tuple], list[tuple]]:
+def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = None, sort: str = "company") -> tuple[list[tuple], list[tuple]]:
     """The SQL query + keyword/location filtering index() has always done,
     extracted so POST /postings/score-batch can run Scorer over EXACTLY
     the same filtered set the cards were rendered from -- one filtering
@@ -1962,6 +2019,19 @@ def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = Non
     (score_batch_route()), so BOTH callers apply the SAME draft filter
     rather than index() alone drifting from what Scorer actually runs
     over.
+
+    2026-09-12 addition (Workspace subsystem): `sort` picks the order
+    filtered_rows come back in. "company" (default) keeps the original
+    company/title order every existing caller still expects. "score_desc"
+    orders by postings.score (the job-fit score) -- done in SQL since
+    it's a plain column; NULLs sort last via `postings.score IS NULL`
+    as the primary sort key (SQLite/libSQL evaluate booleans as 0/1, so
+    NULL, which reads as 1/true, sorts after real scores). "quality_desc"
+    orders by the draft's Critic final_score -- done in Python AFTER the
+    query, since that's a join against drafts_by_posting, not a postings
+    column; postings with no draft sort last, not first, so undrafted
+    postings don't crowd out the drafted ones you're actually trying to
+    compare (master-detail's use case).
 
     Returns (all_rows, filtered_rows); each row is (id, company, title,
     location, status, score, first_seen_at, description) -- description
@@ -1987,7 +2057,10 @@ def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = Non
     if filters["min_score"]:
         query += " AND postings.score >= ?"
         params.append(float(filters["min_score"]))
-    query += " ORDER BY companies.name, postings.title"
+    if sort == "score_desc":
+        query += " ORDER BY postings.score IS NULL, postings.score DESC, companies.name, postings.title"
+    else:
+        query += " ORDER BY companies.name, postings.title"
 
     all_rows = conn.execute(query, tuple(params)).fetchall()
 
@@ -1998,13 +2071,21 @@ def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = Non
         and keyword_filter_match(row[3] or "", location_include, [])
     ]
 
-    if filters.get("draft_status") in ("has", "none"):
+    needs_drafts = filters.get("draft_status") in ("has", "none") or sort == "quality_desc"
+    if needs_drafts:
         if drafts_by_posting is None:
             drafts_by_posting = drafts_db.latest_draft_index(conn)
-        if filters["draft_status"] == "has":
+        if filters.get("draft_status") == "has":
             filtered_rows = [row for row in filtered_rows if row[0] in drafts_by_posting]
-        else:
+        elif filters.get("draft_status") == "none":
             filtered_rows = [row for row in filtered_rows if row[0] not in drafts_by_posting]
+
+    if sort == "quality_desc":
+        def _quality_sort_key(row):
+            draft = drafts_by_posting.get(row[0])
+            score = draft.final_score if draft else None
+            return (score is None, -(score or 0))
+        filtered_rows = sorted(filtered_rows, key=_quality_sort_key)
 
     return all_rows, filtered_rows
 
@@ -2016,7 +2097,7 @@ def index():
 
     filters = _parse_filters(request.args)
     drafts_by_posting = drafts_db.latest_draft_index(conn)
-    all_rows, filtered_rows = _filtered_postings(conn, filters, drafts_by_posting)
+    all_rows, filtered_rows = _filtered_postings(conn, filters, drafts_by_posting, sort=filters["sort"])
 
     companies = _distinct_companies(conn)
     filter_bar = _filter_bar_html(filters, companies)
@@ -2026,6 +2107,17 @@ def index():
     total_pages = max(1, (total + per_page - 1) // per_page)
     page = min(filters["page"], total_pages)
     page_rows = filtered_rows[(page - 1) * per_page : page * per_page]
+
+    pagination_html = ""
+    if total_pages > 1:
+        links = []
+        for p in range(1, total_pages + 1):
+            if p == page:
+                links.append(f'<span class="current">{p}</span>')
+            else:
+                qs = _filters_query_string(filters, page=p)
+                links.append(f'<a href="{url_for("index")}?{qs}">{p}</a>')
+        pagination_html = f'<div class="pagination">{"".join(links)}</div>'
 
     add_manual_link = f'<a class="btn btn--secondary btn--small" href="{url_for("posting_manual_form")}">+ Add posting manually</a>'
     # Combined Scout + dead-link-check button (Captain roadmap #4, direct
@@ -2069,20 +2161,95 @@ def index():
                 active_batch_ids.update(j.get("posting_ids") or [])
     active_posting_ids = active_generate_ids | active_batch_ids
 
+    # Workspace subsystem, 2026-09-12: master-detail layout. Selecting a
+    # posting (?selected=<id>) swaps the grid for a compact list + detail
+    # column, sharing this SAME filtered_rows/page_rows/drafts_by_posting
+    # data -- not a second query, per the roadmap's explicit "one shared
+    # data layer" requirement. Prev/next walk the full filtered_rows (the
+    # entire matching set across all pages, not just page_rows), since the
+    # point is comparing postings across the current filter/sort, not
+    # just within one page. User-elicited decision (2026-09-12): plain
+    # full-reload navigation via the selected= URL param, not an AJAX
+    # partial-swap -- simpler, closer to this file's existing plain-Flask
+    # style. Batch-select checkboxes are intentionally NOT offered here;
+    # that stays on the classic grid to keep this view focused on
+    # browsing/comparing individual postings.
+    if filters["selected"] is not None:
+        selected_id = filters["selected"]
+        filtered_ids = [row[0] for row in filtered_rows]
+        try:
+            selected_pos = filtered_ids.index(selected_id)
+        except ValueError:
+            selected_pos = None
+
+        prev_id = filtered_ids[selected_pos - 1] if selected_pos is not None and selected_pos > 0 else None
+        next_id = (
+            filtered_ids[selected_pos + 1]
+            if selected_pos is not None and selected_pos < len(filtered_ids) - 1
+            else None
+        )
+
+        detail_result = _posting_detail_body(conn, selected_id)
+        if detail_result is None:
+            detail_html = '<p class="empty-state">This posting no longer exists.</p>'
+            detail_title = "Postings"
+        else:
+            detail_title, detail_body = detail_result
+            nav_bits = []
+            if prev_id is not None:
+                nav_bits.append(f'<a class="btn btn--secondary btn--small" href="{url_for("index")}?{_filters_query_string(filters, selected=prev_id)}">&larr; Previous</a>')
+            if selected_pos is not None:
+                nav_bits.append(f'<span>{selected_pos + 1} of {len(filtered_ids)}</span>')
+            if next_id is not None:
+                nav_bits.append(f'<a class="btn btn--secondary btn--small" href="{url_for("index")}?{_filters_query_string(filters, selected=next_id)}">Next &rarr;</a>')
+            nav_bits.append(f'<a class="btn btn--secondary btn--small" href="{url_for("index")}?{_filters_query_string(filters)}">Back to grid</a>')
+            detail_html = f'<div class="workspace__detail-nav">{"".join(nav_bits)}</div>{detail_body}'
+
+        list_rows = []
+        for row in page_rows:
+            row_id, row_company, row_title, row_location, row_status, row_score, _fs, _desc = row
+            row_draft = drafts_by_posting.get(row_id)
+            row_quality = row_draft.final_score if row_draft else None
+            active_class = " workspace__row--active" if row_id == selected_id else ""
+            row_qs = _filters_query_string(filters, selected=row_id)
+            list_rows.append(
+                f"""<a class="workspace__row{active_class}" href="{url_for('index')}?{row_qs}">
+  <div class="workspace__row-company">{_esc(row_company)}</div>
+  <div class="workspace__row-title">{_esc(row_title)}</div>
+  <div class="workspace__row-meta">{_fit_score_badge(row_score)}{_score_badge(row_quality)}</div>
+</a>"""
+            )
+
+        body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Postings</h1>{scout_and_check_form}{recent_jobs_link}
+    <p class="sub">{total} posting(s) match &middot; {len(all_rows)} total (excluding stale) &middot; {add_manual_link}</p></div>
+  {filter_bar}
+  <div class="workspace">
+    <div class="workspace__list">{''.join(list_rows)}{pagination_html}</div>
+    <div class="workspace__detail">{detail_html}</div>
+  </div>
+</div>"""
+        return _page(detail_title, body)
+
     cards = []
     for posting_id, company, title, location, status, score, _first_seen_at, _description in page_rows:
         draft = drafts_by_posting.get(posting_id)
         quality_score = draft.final_score if draft else None
         is_generating = posting_id in active_posting_ids
+        # 2026-09-12 (Workspace subsystem): cards now open the
+        # master-detail split view (?selected=<id>, current filters
+        # preserved) instead of jumping straight to the standalone
+        # /postings/<id> page -- that page still renders identically
+        # via the shared _posting_detail_body(), it's just no longer
+        # the primary click target from the grid, since the whole
+        # point of Workspace was fixing hard-to-navigate postings.
+        card_href = f'{url_for("index")}?{_filters_query_string(filters, selected=posting_id)}'
         if draft:
-            link = f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">View result</a>'
+            link = f'<a class="card__link" href="{card_href}">View result</a>'
         elif is_generating:
-            # Still links to posting_detail -- that page shows the real
-            # live progress panel via its own in-flight check. This card
-            # just needs to stop claiming "Generate" is available.
-            link = f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">Generating…</a>'
+            link = f'<a class="card__link" href="{card_href}">Generating…</a>'
         else:
-            link = f'<a class="card__link" href="{url_for("posting_detail", posting_id=posting_id)}">Generate</a>'
+            link = f'<a class="card__link" href="{card_href}">Generate</a>'
         checkbox_disabled = " disabled" if is_generating else ""
         cards.append(
             f"""<div class="card">
@@ -2095,17 +2262,6 @@ def index():
   <div class="card__footer">{_fit_score_badge(score)}{_score_badge(quality_score)}{link}</div>
 </div>"""
         )
-
-    pagination_html = ""
-    if total_pages > 1:
-        links = []
-        for p in range(1, total_pages + 1):
-            if p == page:
-                links.append(f'<span class="current">{p}</span>')
-            else:
-                qs = _filters_query_string(filters, page=p)
-                links.append(f'<a href="{url_for("index")}?{qs}">{p}</a>')
-        pagination_html = f'<div class="pagination">{"".join(links)}</div>'
 
     body = f"""<div class="dash-wrap">
   <div class="detail-header"><h1>Postings</h1>{scout_and_check_form}{recent_jobs_link}
@@ -2190,13 +2346,27 @@ def _history_panel_html(conn, posting_id: int) -> str:
 </details>"""
 
 
-@app.route("/postings/<int:posting_id>")
-def posting_detail(posting_id):
-    conn = get_connection()
-    init_schema(conn)
+def _posting_detail_body(conn, posting_id: int) -> tuple[str, str] | None:
+    """Builds a posting's detail content (title, inner HTML) -- everything
+    posting_detail() has always rendered: header/apply/mark-stale/delete,
+    the score dial + export links, the editor panel, version history, and
+    the generate/regenerate form (with its own live progress panel and
+    polling script when a job is active). Extracted so index()'s
+    master-detail column (Workspace subsystem) can show the SAME detail
+    content the standalone /postings/<id> page shows -- one rendering
+    implementation, two callers, same pattern _filtered_postings() already
+    established in this file. Returns None if the posting doesn't exist,
+    so each caller decides how to handle that (posting_detail() 404s; the
+    master-detail column just skips rendering a right-hand pane).
+
+    Deliberately does NOT include the outer <div class="dash-wrap"> --
+    posting_detail() wraps this in dash-wrap for the full-page view;
+    index()'s master-detail column wraps it in its own layout instead,
+    since dash-wrap's centered max-width doesn't fit a split-pane column.
+    """
     posting = _get_posting(conn, posting_id)
     if posting is None:
-        abort(404)
+        return None
     draft = drafts_db.get_latest_draft(conn, posting_id)
     edit = drafts_db.get_final_edit(conn, posting_id) if draft is not None else None
 
@@ -2233,7 +2403,7 @@ def posting_detail(posting_id):
   {_generate_options_html()}
   <div class="btn-row"><button class="btn" type="submit">Generate draft</button></div>
 </form>"""
-        return _page(posting["title"], f'<div class="dash-wrap">{header}{jd_form}</div>')
+        return posting["title"], f"{header}{jd_form}"
 
     result_html = ""
     if draft is not None:
@@ -2357,8 +2527,19 @@ def posting_detail(posting_id):
   <div class="btn-row"><button class="btn" type="submit">{regenerate_label}</button></div>
 </form>"""
 
-    body = f'<div class="dash-wrap">{header}{result_html}{editor_html}{history_html}{gen_form}</div>'
-    return _page(posting["title"], body)
+    body = f"{header}{result_html}{editor_html}{history_html}{gen_form}"
+    return posting["title"], body
+
+
+@app.route("/postings/<int:posting_id>")
+def posting_detail(posting_id):
+    conn = get_connection()
+    init_schema(conn)
+    result = _posting_detail_body(conn, posting_id)
+    if result is None:
+        abort(404)
+    title, body = result
+    return _page(title, f'<div class="dash-wrap">{body}</div>')
 
 
 @app.route("/postings/<int:posting_id>/edit", methods=["POST"])
