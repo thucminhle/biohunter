@@ -1546,7 +1546,7 @@ _DASHBOARD_STYLE = """
 .topbar__nav a:hover { color: #F6F7F5; border-bottom-color: var(--accent); }
 .topbar__status { display: flex; align-items: center; gap: 14px; font-size: 12.5px; color: #C7D0CB; }
 .topbar__status a { color: inherit; text-decoration: underline; }
-.dash-wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 96px; }
+.dash-wrap { max-width: 1600px; margin: 0 auto; padding: 32px 24px 96px; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 18px; }
 .card {
@@ -1692,7 +1692,7 @@ input[type=text].wide { width: 100%; font-family: var(--sans); font-size: 14px; 
 /* Roomy tables (added for /tokens' per-run view, 2026-08-23) -- prior to
    this, this file had no table styling at all, so any <table> fell back
    to cramped browser defaults with no padding or row separation. */
-.dash-wrap--wide { max-width: 1320px; }
+.dash-wrap--wide { max-width: 1800px; }
 table { width: 100%; border-collapse: collapse; margin: 8px 0 20px; }
 th, td { padding: 12px 16px; text-align: left; vertical-align: top; font-size: 13.5px; }
 th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint);
@@ -1937,7 +1937,9 @@ def _filter_bar_html(filters: dict, companies: list[str]) -> str:
         selected = " selected" if name == filters["company"] else ""
         company_options.append(f'<option value="{_esc(name)}"{selected}>{_esc(name)}</option>')
 
+    selected_hidden = f'<input type="hidden" name="selected" value="{filters["selected"]}">' if filters["selected"] is not None else ""
     return f"""<form class="filter-bar" method="get" action="{url_for('index')}">
+  {selected_hidden}
   <div class="field"><label for="f-keyword">Keyword (title)</label>
     <input type="text" id="f-keyword" name="keyword" value="{_esc(filters['keyword'])}" placeholder="e.g. mass spec, scientist"></div>
   <div class="field"><label for="f-location">Location keyword</label>
