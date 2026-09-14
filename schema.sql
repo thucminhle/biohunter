@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS postings (
     description     TEXT,
     first_seen_at   TEXT NOT NULL DEFAULT (datetime('now')),
     last_seen_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    status          TEXT NOT NULL DEFAULT 'new',   -- new | scored | applied | rejected | stale
+    status          TEXT NOT NULL DEFAULT 'new',   -- new | scored | prepared | applied | rejected | stale (prepared added 2026-09-13, Kanban)
     score            REAL,   -- job-FIT score (candidate/location/seniority), written by
                               -- scorer.py's `biohunter score-postings` -- NOT Critic's
                               -- resume-quality score, which lives on drafts.final_score
