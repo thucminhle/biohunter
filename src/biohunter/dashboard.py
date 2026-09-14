@@ -1026,6 +1026,7 @@ def _run_generation(
         conn = get_connection()
         init_schema(conn)
         draft_id = drafts_db.save_draft(conn, posting_id, result)
+        _maybe_promote_to_prepared(conn, posting_id)
         _set_job(job_id, status="done", draft_id=draft_id)
         _log_token_usage("generate", job_id, duration_seconds=time.time() - job_start_time)
     except _JobCancelled:
@@ -1182,6 +1183,7 @@ def _run_batch_generation(
                 on_step=on_step,
             )
             draft_id = drafts_db.save_draft(conn, posting_id, result)
+            _maybe_promote_to_prepared(conn, posting_id)
             results.append({
                 "posting_id": posting_id, "company": company_name, "title": job_title,
                 "status": "done", "draft_id": draft_id,
@@ -1546,7 +1548,7 @@ _DASHBOARD_STYLE = """
 .topbar__nav a:hover { color: #F6F7F5; border-bottom-color: var(--accent); }
 .topbar__status { display: flex; align-items: center; gap: 14px; font-size: 12.5px; color: #C7D0CB; }
 .topbar__status a { color: inherit; text-decoration: underline; }
-.dash-wrap { max-width: 1080px; margin: 0 auto; padding: 32px 24px 96px; }
+.dash-wrap { max-width: 1600px; margin: 0 auto; padding: 32px 24px 96px; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 18px; }
 .card {
@@ -1561,8 +1563,11 @@ _DASHBOARD_STYLE = """
 .card__footer { margin-top: 10px; display: flex; align-items: center; justify-content: space-between; }
 
 /* Workspace subsystem, 2026-09-12: master-detail layout (Layout 1 --
-   built and shipped first per the roadmap's explicit build-order
-   warning; Layouts 2/3 (kanban, timeline) are NOT started). */
+   shipped first per the roadmap's explicit build-order warning).
+   Layout 3 (Kanban, below) shipped 2026-09-13. Layout 2 (data-dense
+   table + slide-over drawer, per docs/ROADMAP.md's Workspace section
+   -- NOT a "timeline", despite what an earlier version of this
+   comment said) is still NOT started. */
 .workspace { display: flex; gap: 20px; align-items: flex-start; margin-top: 4px; }
 .workspace__list {
   width: 320px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px;
@@ -1692,7 +1697,7 @@ input[type=text].wide { width: 100%; font-family: var(--sans); font-size: 14px; 
 /* Roomy tables (added for /tokens' per-run view, 2026-08-23) -- prior to
    this, this file had no table styling at all, so any <table> fell back
    to cramped browser defaults with no padding or row separation. */
-.dash-wrap--wide { max-width: 1320px; }
+.dash-wrap--wide { max-width: 1800px; }
 table { width: 100%; border-collapse: collapse; margin: 8px 0 20px; }
 th, td { padding: 12px 16px; text-align: left; vertical-align: top; font-size: 13.5px; }
 th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-faint);
@@ -1732,10 +1737,61 @@ td.dyn-cost, th.dyn-cost { border-left: 2px solid var(--accent); }
 .result-links a { color: var(--accent); text-decoration: none; }
 .result-links a:hover { text-decoration: underline; }
 .result-links details summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+
+/* Workspace subsystem, Layout 3 (Kanban), added 2026-09-13. Columns use
+   var(--bg) (the page background) against cards' var(--panel) (white),
+   same bg/panel contrast .card and .workspace__list already use for
+   depth, rather than a new color pair. */
+.layout-toggle { display: flex; gap: 0; margin-right: 12px; }
+.layout-toggle__btn {
+  background: transparent; border: 1px solid var(--hairline); color: #C7D0CB;
+  font-size: 12px; padding: 5px 12px; cursor: pointer; font-family: inherit;
+}
+.layout-toggle__btn:first-child { border-radius: 4px 0 0 4px; border-right: none; }
+.layout-toggle__btn:last-child { border-radius: 0 4px 4px 0; }
+.layout-toggle__btn--active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.kanban-board { display: flex; gap: 14px; align-items: flex-start; margin-top: 16px; overflow-x: auto; padding-bottom: 12px; }
+.kanban-column {
+  background: var(--bg); border: 1px solid var(--hairline); border-radius: 8px;
+  min-width: 250px; flex: 1; display: flex; flex-direction: column;
+  max-height: calc(100vh - 320px);
+}
+.kanban-column__header {
+  padding: 11px 13px; font-size: 12px; font-weight: 650; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--ink-soft); border-bottom: 1px solid var(--hairline);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.kanban-column__count {
+  background: var(--hairline); color: var(--ink); border-radius: 999px;
+  padding: 1px 8px; font-size: 11px; font-weight: 600;
+}
+.kanban-column__cards { padding: 10px; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; flex: 1; min-height: 60px; }
+.kanban-column__cards--dragover { background: var(--accent-soft); }
+.kanban-card {
+  display: block; background: var(--panel); border: 1px solid var(--hairline);
+  border-radius: 6px; padding: 10px 12px; text-decoration: none; color: inherit;
+  cursor: grab; box-shadow: 0 1px 2px rgba(23, 35, 31, 0.04);
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+.kanban-card:hover { box-shadow: 0 4px 14px rgba(23, 35, 31, 0.09); transform: translateY(-1px); }
+.kanban-card--dragging { opacity: 0.4; }
+.kanban-card__company { font-size: 10.5px; font-family: var(--mono); color: var(--accent); text-transform: uppercase; letter-spacing: 0.05em; }
+.kanban-card__title { font-size: 13.5px; font-weight: 650; margin: 3px 0 7px; line-height: 1.3; }
+.kanban-card__meta { display: flex; gap: 5px; flex-wrap: wrap; }
 """
 
 
 def _page(title: str, body: str) -> str:
+    # Layout-mode toggle needs to know which of Grid/Kanban is currently
+    # active on EVERY page (not just index()), since it's part of the
+    # shared topbar shell every route renders through -- cheap singleton
+    # lookup, same pattern _page() already has no trouble affording for
+    # e.g. the ambient job poller running on every page too.
+    conn = get_connection()
+    init_schema(conn)
+    layout_mode = dashboard_settings.get_dashboard_settings(conn).layout_mode
+    grid_active = " layout-toggle__btn--active" if layout_mode != "kanban" else ""
+    kanban_active = " layout-toggle__btn--active" if layout_mode == "kanban" else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1753,6 +1809,10 @@ def _page(title: str, body: str) -> str:
     <a href="{url_for('tokens_dashboard')}">Token usage</a>
     <a href="{url_for('settings_page')}">Settings</a>
   </nav>
+  <form method="post" action="{url_for('save_layout_mode_route')}" class="layout-toggle">
+    <button type="submit" name="mode" value="master_detail" class="layout-toggle__btn{grid_active}">Grid</button>
+    <button type="submit" name="mode" value="kanban" class="layout-toggle__btn{kanban_active}">Kanban</button>
+  </form>
   <div class="topbar__status">
     <a id="notif-enable" href="#" style="display:none;">Enable notifications</a>
     <span id="job-indicator"></span>
@@ -1840,6 +1900,26 @@ def _page(title: str, body: str) -> str:
 </script>
 </body>
 </html>"""
+
+
+@app.route("/dashboard-settings/layout-mode", methods=["POST"])
+def save_layout_mode_route():
+    """Persists the Workspace layout choice (dashboard_settings.layout_mode)
+    -- target of the topbar Grid/Kanban toggle in _page(), which is why
+    this needs to exist before _page() can reference url_for() for it.
+    Always redirects to index(), since layout_mode only affects that
+    route; the toggle itself is visible on every page (it's part of the
+    shared topbar), but switching it while on e.g. /settings still lands
+    you back on the postings view you just switched the layout of.
+    """
+    mode = request.form.get("mode")
+    if mode not in ("master_detail", "kanban"):
+        abort(400)
+    conn = get_connection()
+    init_schema(conn)
+    current = dashboard_settings.get_dashboard_settings(conn)
+    dashboard_settings.save_dashboard_settings(conn, layout_mode=mode, palette=current.palette)
+    return redirect(url_for("index"))
 
 
 def _score_badge(score: int | None) -> str:
@@ -1937,7 +2017,9 @@ def _filter_bar_html(filters: dict, companies: list[str]) -> str:
         selected = " selected" if name == filters["company"] else ""
         company_options.append(f'<option value="{_esc(name)}"{selected}>{_esc(name)}</option>')
 
+    selected_hidden = f'<input type="hidden" name="selected" value="{filters["selected"]}">' if filters["selected"] is not None else ""
     return f"""<form class="filter-bar" method="get" action="{url_for('index')}">
+  {selected_hidden}
   <div class="field"><label for="f-keyword">Keyword (title)</label>
     <input type="text" id="f-keyword" name="keyword" value="{_esc(filters['keyword'])}" placeholder="e.g. mass spec, scientist"></div>
   <div class="field"><label for="f-location">Location keyword</label>
@@ -2005,7 +2087,7 @@ def _score_batch_form_html(filters: dict, matched_count: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = None, sort: str = "company") -> tuple[list[tuple], list[tuple]]:
+def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = None, sort: str = "company", include_stale: bool = False) -> tuple[list[tuple], list[tuple]]:
     """The SQL query + keyword/location filtering index() has always done,
     extracted so POST /postings/score-batch can run Scorer over EXACTLY
     the same filtered set the cards were rendered from -- one filtering
@@ -2037,26 +2119,38 @@ def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = Non
     location, status, score, first_seen_at, description) -- description
     added (index() itself doesn't use it, only ignores the extra column)
     so score-batch doesn't need a second query to fetch it.
+
+    2026-09-13 addition (Kanban): `include_stale` defaults to False so
+    every existing caller (index()'s Grid layout, score_batch_route())
+    keeps its exact prior behavior of never seeing stale postings. Only
+    the Kanban view passes True -- Kanban's whole premise is a "stale"
+    column, so it's the one caller that needs the row this function
+    otherwise always filters out at the SQL level.
     """
+    conditions: list[str] = []
+    params: list = []
+    if not include_stale:
+        conditions.append("postings.status != 'stale'")
+    if filters["company"]:
+        conditions.append("companies.name = ?")
+        params.append(filters["company"])
+    if filters["date_from"]:
+        conditions.append("date(postings.first_seen_at) >= date(?)")
+        params.append(filters["date_from"])
+    if filters["date_to"]:
+        conditions.append("date(postings.first_seen_at) <= date(?)")
+        params.append(filters["date_to"])
+    if filters["min_score"]:
+        conditions.append("postings.score >= ?")
+        params.append(float(filters["min_score"]))
+
     query = """
         SELECT postings.id, companies.name, postings.title, postings.location,
                postings.status, postings.score, postings.first_seen_at, postings.description
         FROM postings JOIN companies ON postings.company_id = companies.id
-        WHERE postings.status != 'stale'
     """
-    params: list = []
-    if filters["company"]:
-        query += " AND companies.name = ?"
-        params.append(filters["company"])
-    if filters["date_from"]:
-        query += " AND date(postings.first_seen_at) >= date(?)"
-        params.append(filters["date_from"])
-    if filters["date_to"]:
-        query += " AND date(postings.first_seen_at) <= date(?)"
-        params.append(filters["date_to"])
-    if filters["min_score"]:
-        query += " AND postings.score >= ?"
-        params.append(float(filters["min_score"]))
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
     if sort == "score_desc":
         query += " ORDER BY postings.score IS NULL, postings.score DESC, companies.name, postings.title"
     else:
@@ -2090,12 +2184,214 @@ def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = Non
     return all_rows, filtered_rows
 
 
+KANBAN_COLUMNS = [
+    ("new", "New"),
+    ("scored", "Scored"),
+    ("prepared", "Prepared"),
+    ("applied", "Applied"),
+    ("rejected", "Rejected"),
+    ("stale", "Stale"),
+]
+
+# "prepared" is earned, not dragged -- see _maybe_promote_to_prepared().
+# Every OTHER status is a real person action the app can't observe on
+# its own (you applied, you got rejected, the link died), so those stay
+# freely draggable. Kept as its own tuple rather than filtering
+# KANBAN_COLUMNS at call time so the "which ones are draggable" rule is
+# a single readable fact next to the one place status validity is
+# checked (update_posting_status_route()), not implicit in list order.
+DRAG_TARGET_STATUSES = ("new", "scored", "applied", "rejected", "stale")
+
+_KANBAN_SCRIPT = """<script>
+(function() {
+  var board = document.querySelector(".kanban-board");
+  if (!board) return;
+  var draggedCard = null;
+
+  function updateCount(column) {
+    if (!column) return;
+    var count = column.querySelectorAll(".kanban-card").length;
+    var countEl = column.querySelector(".kanban-column__count");
+    if (countEl) countEl.textContent = count;
+  }
+
+  board.addEventListener("dragstart", function(e) {
+    var card = e.target.closest(".kanban-card");
+    if (!card) return;
+    draggedCard = card;
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", card.dataset.postingId);
+    card.classList.add("kanban-card--dragging");
+  });
+
+  board.addEventListener("dragend", function(e) {
+    var card = e.target.closest(".kanban-card");
+    if (card) card.classList.remove("kanban-card--dragging");
+    draggedCard = null;
+  });
+
+  board.querySelectorAll(".kanban-column__cards").forEach(function(colCards) {
+    // "prepared" is earned by generating a draft, not by dragging --
+    // see KANBAN_COLUMNS' comment server-side. Show a blocked cursor
+    // on hover rather than the normal move cursor, so the rule is
+    // visible before a person commits to the drag, not just after.
+    var isPreparedColumn = colCards.dataset.status === "prepared";
+
+    colCards.addEventListener("dragover", function(e) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = isPreparedColumn ? "none" : "move";
+      if (!isPreparedColumn) colCards.classList.add("kanban-column__cards--dragover");
+    });
+    colCards.addEventListener("dragleave", function() {
+      colCards.classList.remove("kanban-column__cards--dragover");
+    });
+    colCards.addEventListener("drop", function(e) {
+      e.preventDefault();
+      colCards.classList.remove("kanban-column__cards--dragover");
+      if (!draggedCard) return;
+
+      var newStatus = colCards.dataset.status;
+      var oldStatus = draggedCard.dataset.status;
+      var postingId = draggedCard.dataset.postingId;
+      if (newStatus === oldStatus) return;
+
+      if (isPreparedColumn) {
+        alert("Prepared is set automatically once you generate a resume and cover letter for this posting -- it can't be dragged in.");
+        return;
+      }
+
+      // Instant move (person's explicit choice over a full reload) --
+      // moves the card in the DOM immediately, then persists via
+      // fetch(); reverts on failure rather than leaving a silently
+      // drifted board.
+      var oldColumn = document.querySelector('.kanban-column[data-status="' + oldStatus + '"]');
+      var newColumn = colCards.closest(".kanban-column");
+      colCards.appendChild(draggedCard);
+      draggedCard.dataset.status = newStatus;
+      updateCount(oldColumn);
+      updateCount(newColumn);
+
+      fetch("/postings/" + postingId + "/status", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({status: newStatus})
+      }).then(function(r) {
+        if (!r.ok) throw new Error("status " + r.status);
+        return r.json();
+      }).then(function(data) {
+        if (!data.ok) throw new Error(data.error || "unknown error");
+      }).catch(function(err) {
+        var revertTarget = document.querySelector('.kanban-column__cards[data-status="' + oldStatus + '"]');
+        if (revertTarget) {
+          revertTarget.appendChild(draggedCard);
+          draggedCard.dataset.status = oldStatus;
+          updateCount(oldColumn);
+          updateCount(newColumn);
+        }
+        alert("Could not save status change: " + err.message);
+      });
+    });
+  });
+})();
+</script>"""
+
+
+def _kanban_page(conn, filters: dict) -> str:
+    """Layout 3 (Kanban). Reads the SAME shared, filtered data layer as
+    Grid -- _filter_bar_html() + _filtered_postings() -- per the
+    roadmap's explicit architecture note: one shared filtered/sorted
+    layer, three interchangeable layout renderers, not three separate
+    queries. The one difference from Grid's own call:
+    include_stale=True, since Kanban's whole premise is a "stale"
+    column and _filtered_postings() otherwise always excludes it (see
+    that function's docstring for why).
+
+    Columns are postings.status's six known values (schema.sql) --
+    originally five (new/scored/applied/rejected/stale) per the
+    roadmap, plus "prepared" (2026-09-13): every status EXCEPT
+    prepared is a real person action the app can't observe on its own
+    (you applied, you got rejected, a link died), so those stay
+    freely draggable via _KANBAN_SCRIPT -> POST /postings/<id>/status
+    (see update_posting_status_route(), DRAG_TARGET_STATUSES,
+    _set_posting_status()). "prepared" is different: it's earned by
+    generating a resume + cover letter, not dragged -- see
+    _maybe_promote_to_prepared(), the only place that ever sets it.
+    A has-draft/quality badge still shows on cards in every OTHER
+    column too, not just Prepared, since a posting can be e.g.
+    "applied" AND have a draft -- draft status and application status
+    stayed orthogonal facts even after this hybrid, per the roadmap's
+    original reasoning for keeping them separate axes at all.
+    """
+    drafts_by_posting = drafts_db.latest_draft_index(conn)
+    all_rows, filtered_rows = _filtered_postings(
+        conn, filters, drafts_by_posting, sort=filters["sort"], include_stale=True
+    )
+    companies = _distinct_companies(conn)
+    filter_bar = _filter_bar_html(filters, companies)
+
+    # Bucket by the actual status value -- not just the five expected
+    # ones -- since postings.status has no DB-level CHECK constraint
+    # (schema.sql), only the app-level convention of these five values.
+    # A stray/legacy value shouldn't vanish from the board silently.
+    columns_by_status: dict[str, list] = {}
+    for row in filtered_rows:
+        columns_by_status.setdefault(row[4], []).append(row)
+
+    column_html = []
+    for status, label in KANBAN_COLUMNS:
+        rows = columns_by_status.get(status, [])
+        cards = []
+        for row in rows:
+            row_id, row_company, row_title, row_location, row_status, row_score, _fs, _desc = row
+            row_draft = drafts_by_posting.get(row_id)
+            row_quality = row_draft.final_score if row_draft else None
+            cards.append(f"""<a class="kanban-card" draggable="true" data-posting-id="{row_id}"
+   data-status="{_esc(status)}" href="{url_for('posting_detail', posting_id=row_id)}">
+  <div class="kanban-card__company">{_esc(row_company)}</div>
+  <div class="kanban-card__title">{_esc(row_title)}</div>
+  <div class="kanban-card__meta">{_fit_score_badge(row_score)}{_score_badge(row_quality)}</div>
+</a>""")
+        column_html.append(f"""<div class="kanban-column" data-status="{status}">
+  <div class="kanban-column__header">{_esc(label)} <span class="kanban-column__count">{len(rows)}</span></div>
+  <div class="kanban-column__cards" data-status="{status}">{''.join(cards)}</div>
+</div>""")
+
+    known_statuses = {status for status, _label in KANBAN_COLUMNS}
+    stray_statuses = sorted(set(columns_by_status) - known_statuses)
+    stray_note = ""
+    if stray_statuses:
+        stray_count = sum(len(columns_by_status[s]) for s in stray_statuses)
+        stray_note = (
+            f'<p class="sub">Note: {stray_count} posting(s) have an unrecognized '
+            f'status ({_esc(", ".join(stray_statuses))}) and aren\'t shown in any column above.</p>'
+        )
+
+    body = f"""<div class="dash-wrap">
+  <div class="detail-header"><h1>Postings</h1>
+    <p class="sub">{len(filtered_rows)} posting(s) match, across all statuses (Kanban always includes stale)</p></div>
+  {filter_bar}
+  {stray_note}
+  <div class="kanban-board">{''.join(column_html)}</div>
+</div>
+{_KANBAN_SCRIPT}"""
+    return _page("Postings", body)
+
+
 @app.route("/")
 def index():
     conn = get_connection()
     init_schema(conn)
 
     filters = _parse_filters(request.args)
+
+    # Workspace layout branch, added 2026-09-13 alongside Kanban (Layout
+    # 3). Everything below this point is Grid/master-detail (Layout 1),
+    # completely unchanged from before this branch existed -- Kanban is
+    # a fully separate render function, not interleaved into this one,
+    # so Grid's existing, already-tested behavior can't regress here.
+    if dashboard_settings.get_dashboard_settings(conn).layout_mode == "kanban":
+        return _kanban_page(conn, filters)
+
     drafts_by_posting = drafts_db.latest_draft_index(conn)
     all_rows, filtered_rows = _filtered_postings(conn, filters, drafts_by_posting, sort=filters["sort"])
 
@@ -3198,15 +3494,61 @@ function showTab(name) {{
     return _page("Dead link check", body)
 
 
+def _maybe_promote_to_prepared(conn, posting_id: int) -> None:
+    """Called right after drafts_db.save_draft() succeeds, from both
+    generate() and batch_generate()'s job functions -- the only two
+    places a draft actually gets created. Auto-advances a posting to
+    Kanban's "prepared" column, but ONLY from "new" or "scored":
+    generating a draft is not allowed to silently overwrite a status a
+    person set by hand (applied/rejected/stale), or the Kanban board
+    would contradict its own drag history the next time someone
+    regenerates a draft for a posting they already acted on.
+
+    This is the ONLY path that ever sets status='prepared' -- see
+    KANBAN_COLUMNS' comment for why dragging a card into that column
+    isn't allowed: this function is what "earning" it actually means.
+    """
+    row = conn.execute("SELECT status FROM postings WHERE id = ?", (posting_id,)).fetchone()
+    if row is not None and row[0] in ("new", "scored"):
+        _set_posting_status(conn, posting_id, "prepared")
+
+
+def _set_posting_status(conn, posting_id: int, new_status: str) -> None:
+    """The one write path for changing postings.status outside the
+    dead-link-check flow's own bulk form. Added 2026-09-13 alongside
+    Kanban drag-and-drop, which needed a second place that can write
+    status='stale' (dragging a card into the Stale column) -- rather
+    than a second copy of mark_stale_route()'s UPDATE, this is the
+    single shared helper both now call, so "becoming stale" always
+    means the same COALESCE(stale_at, ...) handling described there,
+    and a future third caller can't quietly diverge either.
+
+    Every other status transition (new/scored/applied/rejected, and
+    moving OFF stale) is a plain column write -- stale_at is a
+    one-way, set-once timestamp by design (see schema.sql), so nothing
+    else ever touches it.
+    """
+    if new_status == "stale":
+        conn.execute(
+            "UPDATE postings SET status = 'stale', stale_at = COALESCE(stale_at, datetime('now')) WHERE id = ?",
+            (posting_id,),
+        )
+    else:
+        conn.execute("UPDATE postings SET status = ? WHERE id = ?", (new_status, posting_id))
+    conn.commit()
+
+
 @app.route("/postings/mark-stale", methods=["POST"])
 def mark_stale_route():
-    """The only route that actually writes status='stale' from this
-    feature -- called either from dead_links_results()'s bulk-confirm
-    form (posting_id appears once per checked box) or from the
-    single-posting 'Mark as stale' button on posting_detail() (a lone
-    posting_id). Never called automatically -- see _run_dead_link_check_job's
-    docstring for why a detected dead link is a candidate, not a write,
-    until a person submits this form.
+    """The only route that writes status='stale' from the dead-link-check
+    flow -- called either from dead_links_results()'s bulk-confirm form
+    (posting_id appears once per checked box) or from the single-posting
+    'Mark as stale' button on posting_detail() (a lone posting_id). Never
+    called automatically -- see _run_dead_link_check_job's docstring for
+    why a detected dead link is a candidate, not a write, until a person
+    submits this form. (Kanban's drag-to-Stale is the other, deliberate,
+    person-initiated way status becomes 'stale' -- see
+    _set_posting_status(), which both routes now share.)
 
     Appends ?marked=<count> onto the redirect -- added after a real
     session where submitting this form redirected back to
@@ -3222,19 +3564,51 @@ def mark_stale_route():
     if posting_ids:
         conn = get_connection()
         init_schema(conn)
-        conn.executemany(
-            # COALESCE so re-confirming an already-stale posting (e.g. it
-            # shows up in a later dead-link sweep before a repost lands)
-            # doesn't reset the clock repost-turnaround-time is measured
-            # from -- stale_at is meant to be set exactly once.
-            "UPDATE postings SET status = 'stale', stale_at = COALESCE(stale_at, datetime('now')) WHERE id = ?",
-            [(pid,) for pid in posting_ids],
-        )
-        conn.commit()
+        for pid in posting_ids:
+            _set_posting_status(conn, pid, "stale")
         marked_count = len(posting_ids)
     redirect_to = request.form.get("redirect_to") or url_for("index")
     separator = "&" if "?" in redirect_to else "?"
     return redirect(f"{redirect_to}{separator}marked={marked_count}")
+
+
+POSTING_STATUSES = ("new", "scored", "prepared", "applied", "rejected", "stale")
+
+
+@app.route("/postings/<int:posting_id>/status", methods=["POST"])
+def update_posting_status_route(posting_id):
+    """JSON endpoint for Kanban's drag-and-drop -- the only other route
+    (besides mark_stale_route) that changes postings.status. Unlike
+    every other write route in this file, this one is called via
+    fetch() from kanban.js's drop handler, not a full-page form submit,
+    since the person chose an instant-move (no page reload) interaction
+    for Kanban -- so it returns JSON, not a redirect.
+
+    Validates posting_id and the target status server-side even though
+    kanban.js only ever sends a dragged card's own real id and one of
+    the five column values -- this is a real write path reachable by
+    anything that can POST here, not just the board's own JS.
+    """
+    payload = request.get_json(silent=True) or {}
+    new_status = payload.get("status")
+    if new_status not in DRAG_TARGET_STATUSES:
+        # Covers both a genuinely invalid value AND "prepared" -- the
+        # latter is a legal status (POSTING_STATUSES), just not one
+        # this write path will set. kanban.js already blocks the drop
+        # client-side before ever sending this request; this is the
+        # server-side half of that rule, since a client-side check
+        # alone isn't a real guarantee against anything else that can
+        # POST here.
+        return jsonify({"ok": False, "error": f"not a draggable target: {new_status!r}"}), 400
+
+    conn = get_connection()
+    init_schema(conn)
+    row = conn.execute("SELECT id FROM postings WHERE id = ?", (posting_id,)).fetchone()
+    if row is None:
+        return jsonify({"ok": False, "error": "posting not found"}), 404
+
+    _set_posting_status(conn, posting_id, new_status)
+    return jsonify({"ok": True, "posting_id": posting_id, "status": new_status})
 
 
 @app.route("/postings/delete", methods=["POST"])

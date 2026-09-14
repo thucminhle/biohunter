@@ -14,9 +14,7 @@ Compiled_Resume_Qdrant_Ready.md
 *.egg-info/
 .DS_Store
 reports/
-scripts/
 .mypy_cache/
 .pytest_cache/
-{src/
 snapshots/
 tests/
