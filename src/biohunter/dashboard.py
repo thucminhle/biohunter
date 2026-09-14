@@ -1026,6 +1026,7 @@ def _run_generation(
         conn = get_connection()
         init_schema(conn)
         draft_id = drafts_db.save_draft(conn, posting_id, result)
+        _maybe_promote_to_prepared(conn, posting_id)
         _set_job(job_id, status="done", draft_id=draft_id)
         _log_token_usage("generate", job_id, duration_seconds=time.time() - job_start_time)
     except _JobCancelled:
@@ -1182,6 +1183,7 @@ def _run_batch_generation(
                 on_step=on_step,
             )
             draft_id = drafts_db.save_draft(conn, posting_id, result)
+            _maybe_promote_to_prepared(conn, posting_id)
             results.append({
                 "posting_id": posting_id, "company": company_name, "title": job_title,
                 "status": "done", "draft_id": draft_id,
@@ -2185,10 +2187,20 @@ def _filtered_postings(conn, filters: dict, drafts_by_posting: dict | None = Non
 KANBAN_COLUMNS = [
     ("new", "New"),
     ("scored", "Scored"),
+    ("prepared", "Prepared"),
     ("applied", "Applied"),
     ("rejected", "Rejected"),
     ("stale", "Stale"),
 ]
+
+# "prepared" is earned, not dragged -- see _maybe_promote_to_prepared().
+# Every OTHER status is a real person action the app can't observe on
+# its own (you applied, you got rejected, the link died), so those stay
+# freely draggable. Kept as its own tuple rather than filtering
+# KANBAN_COLUMNS at call time so the "which ones are draggable" rule is
+# a single readable fact next to the one place status validity is
+# checked (update_posting_status_route()), not implicit in list order.
+DRAG_TARGET_STATUSES = ("new", "scored", "applied", "rejected", "stale")
 
 _KANBAN_SCRIPT = """<script>
 (function() {
@@ -2219,10 +2231,16 @@ _KANBAN_SCRIPT = """<script>
   });
 
   board.querySelectorAll(".kanban-column__cards").forEach(function(colCards) {
+    // "prepared" is earned by generating a draft, not by dragging --
+    // see KANBAN_COLUMNS' comment server-side. Show a blocked cursor
+    // on hover rather than the normal move cursor, so the rule is
+    // visible before a person commits to the drag, not just after.
+    var isPreparedColumn = colCards.dataset.status === "prepared";
+
     colCards.addEventListener("dragover", function(e) {
       e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      colCards.classList.add("kanban-column__cards--dragover");
+      e.dataTransfer.dropEffect = isPreparedColumn ? "none" : "move";
+      if (!isPreparedColumn) colCards.classList.add("kanban-column__cards--dragover");
     });
     colCards.addEventListener("dragleave", function() {
       colCards.classList.remove("kanban-column__cards--dragover");
@@ -2236,6 +2254,11 @@ _KANBAN_SCRIPT = """<script>
       var oldStatus = draggedCard.dataset.status;
       var postingId = draggedCard.dataset.postingId;
       if (newStatus === oldStatus) return;
+
+      if (isPreparedColumn) {
+        alert("Prepared is set automatically once you generate a resume and cover letter for this posting -- it can't be dragged in.");
+        return;
+      }
 
       // Instant move (person's explicit choice over a full reload) --
       // moves the card in the DOM immediately, then persists via
@@ -2283,12 +2306,21 @@ def _kanban_page(conn, filters: dict) -> str:
     column and _filtered_postings() otherwise always excludes it (see
     that function's docstring for why).
 
-    Columns are postings.status's five known values (schema.sql).
-    has-draft is a card badge, not a column, per the roadmap -- draft
-    status and application status are orthogonal facts about a
-    posting, not the same axis. Drag-and-drop writes are handled by
-    _KANBAN_SCRIPT calling POST /postings/<id>/status -- see
-    update_posting_status_route() and _set_posting_status().
+    Columns are postings.status's six known values (schema.sql) --
+    originally five (new/scored/applied/rejected/stale) per the
+    roadmap, plus "prepared" (2026-09-13): every status EXCEPT
+    prepared is a real person action the app can't observe on its own
+    (you applied, you got rejected, a link died), so those stay
+    freely draggable via _KANBAN_SCRIPT -> POST /postings/<id>/status
+    (see update_posting_status_route(), DRAG_TARGET_STATUSES,
+    _set_posting_status()). "prepared" is different: it's earned by
+    generating a resume + cover letter, not dragged -- see
+    _maybe_promote_to_prepared(), the only place that ever sets it.
+    A has-draft/quality badge still shows on cards in every OTHER
+    column too, not just Prepared, since a posting can be e.g.
+    "applied" AND have a draft -- draft status and application status
+    stayed orthogonal facts even after this hybrid, per the roadmap's
+    original reasoning for keeping them separate axes at all.
     """
     drafts_by_posting = drafts_db.latest_draft_index(conn)
     all_rows, filtered_rows = _filtered_postings(
@@ -3462,6 +3494,25 @@ function showTab(name) {{
     return _page("Dead link check", body)
 
 
+def _maybe_promote_to_prepared(conn, posting_id: int) -> None:
+    """Called right after drafts_db.save_draft() succeeds, from both
+    generate() and batch_generate()'s job functions -- the only two
+    places a draft actually gets created. Auto-advances a posting to
+    Kanban's "prepared" column, but ONLY from "new" or "scored":
+    generating a draft is not allowed to silently overwrite a status a
+    person set by hand (applied/rejected/stale), or the Kanban board
+    would contradict its own drag history the next time someone
+    regenerates a draft for a posting they already acted on.
+
+    This is the ONLY path that ever sets status='prepared' -- see
+    KANBAN_COLUMNS' comment for why dragging a card into that column
+    isn't allowed: this function is what "earning" it actually means.
+    """
+    row = conn.execute("SELECT status FROM postings WHERE id = ?", (posting_id,)).fetchone()
+    if row is not None and row[0] in ("new", "scored"):
+        _set_posting_status(conn, posting_id, "prepared")
+
+
 def _set_posting_status(conn, posting_id: int, new_status: str) -> None:
     """The one write path for changing postings.status outside the
     dead-link-check flow's own bulk form. Added 2026-09-13 alongside
@@ -3521,7 +3572,7 @@ def mark_stale_route():
     return redirect(f"{redirect_to}{separator}marked={marked_count}")
 
 
-POSTING_STATUSES = ("new", "scored", "applied", "rejected", "stale")
+POSTING_STATUSES = ("new", "scored", "prepared", "applied", "rejected", "stale")
 
 
 @app.route("/postings/<int:posting_id>/status", methods=["POST"])
@@ -3540,8 +3591,15 @@ def update_posting_status_route(posting_id):
     """
     payload = request.get_json(silent=True) or {}
     new_status = payload.get("status")
-    if new_status not in POSTING_STATUSES:
-        return jsonify({"ok": False, "error": f"invalid status: {new_status!r}"}), 400
+    if new_status not in DRAG_TARGET_STATUSES:
+        # Covers both a genuinely invalid value AND "prepared" -- the
+        # latter is a legal status (POSTING_STATUSES), just not one
+        # this write path will set. kanban.js already blocks the drop
+        # client-side before ever sending this request; this is the
+        # server-side half of that rule, since a client-side check
+        # alone isn't a real guarantee against anything else that can
+        # POST here.
+        return jsonify({"ok": False, "error": f"not a draggable target: {new_status!r}"}), 400
 
     conn = get_connection()
     init_schema(conn)
